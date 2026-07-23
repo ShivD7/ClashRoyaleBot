@@ -1,6 +1,9 @@
+import pytest
+
 from arena_viewer import (
     MATCH_DURATION_SECONDS,
     ArenaViewer,
+    ElixirMeter,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
     TILE_SIZE,
@@ -122,3 +125,50 @@ def test_match_timer_uses_minutes_and_zero_padded_seconds() -> None:
     assert format_match_time(125) == "2:05"
     assert format_match_time(9) == "0:09"
     assert format_match_time(0) == "0:00"
+
+
+def test_elixir_starts_at_five_and_generates_continuously() -> None:
+    meter = ElixirMeter()
+
+    meter.update(1.4, match_elapsed=0.0)
+
+    assert meter.amount == pytest.approx(5.5)
+
+
+def test_elixir_generation_uses_double_and_triple_rates() -> None:
+    double_meter = ElixirMeter(amount=0)
+    triple_meter = ElixirMeter(amount=0)
+
+    double_meter.update(1.4, match_elapsed=120.0)
+    triple_meter.update(2.8, match_elapsed=240.0)
+
+    assert double_meter.amount == pytest.approx(1.0)
+    assert triple_meter.amount == pytest.approx(3.0)
+
+
+def test_elixir_generation_accounts_for_rate_boundary_in_same_tick() -> None:
+    meter = ElixirMeter(amount=0)
+
+    meter.update(2.0, match_elapsed=119.0)
+
+    assert meter.amount == pytest.approx(3 / 2.8)
+
+
+def test_elixir_caps_at_ten_and_does_not_bank_overflow() -> None:
+    meter = ElixirMeter(amount=9.75)
+
+    meter.update(10.0, match_elapsed=0.0)
+    assert meter.amount == 10
+
+    assert meter.spend(4)
+    assert meter.amount == 6
+
+
+def test_elixir_can_only_be_spent_when_affordable() -> None:
+    meter = ElixirMeter(amount=3.5)
+
+    assert not meter.spend(4)
+    assert meter.amount == 3.5
+
+    assert meter.spend(3)
+    assert meter.amount == pytest.approx(0.5)
