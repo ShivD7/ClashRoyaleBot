@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pygame
 
 
 SCREEN_WIDTH = 450
-SCREEN_HEIGHT = 500
+SCREEN_HEIGHT = 800
 GRID_COLUMNS = 18
 GRID_ROWS = 32
 TILE_SIZE = 25
@@ -19,6 +21,35 @@ HOVER_COLOR = (255, 255, 255, 75)
 SELECTED_COLOR = (255, 218, 71)
 TEXT_COLOR = (245, 245, 245)
 TEXT_BACKGROUND_COLOR = (20, 35, 24, 185)
+STONE_COLOR = (207, 196, 170)
+STONE_SHADOW_COLOR = (135, 125, 107)
+STONE_HIGHLIGHT_COLOR = (235, 226, 204)
+TOWER_OPENING_COLOR = (50, 43, 39)
+RED_TEAM_COLOR = (205, 57, 61)
+RED_TEAM_LIGHT_COLOR = (244, 93, 87)
+BLUE_TEAM_COLOR = (45, 111, 196)
+BLUE_TEAM_LIGHT_COLOR = (74, 157, 229)
+CROWN_COLOR = (255, 205, 54)
+CROWN_SHADOW_COLOR = (193, 128, 28)
+
+
+@dataclass(frozen=True)
+class Tower:
+    """A tower placed in the arena."""
+
+    kind: str
+    team: str
+    center: tuple[int, int]
+
+
+TOWERS = (
+    Tower("king", "red", (225, 63)),
+    Tower("princess", "red", (112, 138)),
+    Tower("princess", "red", (338, 138)),
+    Tower("princess", "blue", (112, 662)),
+    Tower("princess", "blue", (338, 662)),
+    Tower("king", "blue", (225, 737)),
+)
 
 
 class ArenaViewer:
@@ -105,6 +136,157 @@ class ArenaViewer:
                 1,
             )
 
+    @staticmethod
+    def team_colors(team: str) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        """Return the main and highlight colors for a tower's team."""
+        if team == "red":
+            return RED_TEAM_COLOR, RED_TEAM_LIGHT_COLOR
+        return BLUE_TEAM_COLOR, BLUE_TEAM_LIGHT_COLOR
+
+    def draw_princess_tower(self, tower: Tower) -> None:
+        """Draw a compact stone princess tower with an archer platform."""
+        center_x, center_y = tower.center
+        team_color, team_light = self.team_colors(tower.team)
+
+        base = pygame.Rect(center_x - 23, center_y - 20, 46, 43)
+        pygame.draw.rect(self.screen, STONE_SHADOW_COLOR, base, border_radius=7)
+        pygame.draw.rect(
+            self.screen,
+            STONE_COLOR,
+            (base.x + 3, base.y + 2, base.width - 6, base.height - 7),
+            border_radius=5,
+        )
+
+        # Chunky stone blocks keep the silhouette close to the in-game towers.
+        for block_x in (base.x + 5, base.centerx - 6, base.right - 17):
+            pygame.draw.rect(
+                self.screen,
+                STONE_HIGHLIGHT_COLOR,
+                (block_x, base.y - 7, 12, 13),
+                border_radius=2,
+            )
+
+        band = pygame.Rect(base.x + 2, center_y + 5, base.width - 4, 9)
+        pygame.draw.rect(self.screen, team_color, band, border_radius=2)
+        pygame.draw.line(
+            self.screen,
+            team_light,
+            (band.left + 3, band.top + 2),
+            (band.right - 3, band.top + 2),
+            2,
+        )
+
+        opening = pygame.Rect(center_x - 8, center_y - 12, 16, 18)
+        pygame.draw.ellipse(self.screen, TOWER_OPENING_COLOR, opening)
+        pygame.draw.rect(
+            self.screen,
+            TOWER_OPENING_COLOR,
+            (opening.x, opening.centery, opening.width, opening.height // 2),
+        )
+
+        roof = [
+            (center_x - 18, center_y - 20),
+            (center_x, center_y - 34),
+            (center_x + 18, center_y - 20),
+        ]
+        pygame.draw.polygon(self.screen, team_color, roof)
+        pygame.draw.line(
+            self.screen,
+            team_light,
+            roof[0],
+            roof[1],
+            3,
+        )
+        pygame.draw.line(
+            self.screen,
+            team_light,
+            roof[1],
+            roof[2],
+            3,
+        )
+
+        # Gold crown badge.
+        pygame.draw.circle(self.screen, CROWN_SHADOW_COLOR, (center_x, center_y + 10), 7)
+        pygame.draw.circle(self.screen, CROWN_COLOR, (center_x, center_y + 9), 6)
+        pygame.draw.polygon(
+            self.screen,
+            team_color,
+            [
+                (center_x - 4, center_y + 10),
+                (center_x - 3, center_y + 5),
+                (center_x, center_y + 8),
+                (center_x + 3, center_y + 5),
+                (center_x + 4, center_y + 10),
+            ],
+        )
+
+    def draw_king_tower(self, tower: Tower) -> None:
+        """Draw the larger central tower with battlements and a crown."""
+        center_x, center_y = tower.center
+        team_color, team_light = self.team_colors(tower.team)
+
+        shadow = pygame.Rect(center_x - 30, center_y - 25, 60, 54)
+        pygame.draw.rect(self.screen, STONE_SHADOW_COLOR, shadow, border_radius=8)
+        body = pygame.Rect(center_x - 26, center_y - 22, 52, 46)
+        pygame.draw.rect(self.screen, STONE_COLOR, body, border_radius=6)
+
+        battlement_y = body.y - 9
+        for block_x in (body.x, body.x + 19, body.right - 14):
+            pygame.draw.rect(
+                self.screen,
+                STONE_HIGHLIGHT_COLOR,
+                (block_x, battlement_y, 14, 16),
+                border_radius=2,
+            )
+
+        pygame.draw.rect(
+            self.screen,
+            team_color,
+            (body.x - 2, center_y + 5, body.width + 4, 12),
+            border_radius=3,
+        )
+        pygame.draw.line(
+            self.screen,
+            team_light,
+            (body.x + 2, center_y + 8),
+            (body.right - 2, center_y + 8),
+            3,
+        )
+
+        doorway = pygame.Rect(center_x - 10, center_y - 12, 20, 25)
+        pygame.draw.ellipse(self.screen, TOWER_OPENING_COLOR, doorway)
+        pygame.draw.rect(
+            self.screen,
+            TOWER_OPENING_COLOR,
+            (doorway.x, doorway.centery, doorway.width, doorway.height // 2),
+        )
+
+        crown_y = center_y - 34
+        crown = [
+            (center_x - 14, crown_y + 14),
+            (center_x - 14, crown_y),
+            (center_x - 6, crown_y + 8),
+            (center_x, crown_y - 2),
+            (center_x + 6, crown_y + 8),
+            (center_x + 14, crown_y),
+            (center_x + 14, crown_y + 14),
+        ]
+        pygame.draw.polygon(self.screen, CROWN_SHADOW_COLOR, crown)
+        pygame.draw.polygon(
+            self.screen,
+            CROWN_COLOR,
+            [(x, y - 2) for x, y in crown],
+        )
+        pygame.draw.circle(self.screen, RED_TEAM_COLOR, (center_x, crown_y + 9), 3)
+
+    def draw_towers(self) -> None:
+        """Draw all six arena towers."""
+        for tower in TOWERS:
+            if tower.kind == "king":
+                self.draw_king_tower(tower)
+            else:
+                self.draw_princess_tower(tower)
+
     def draw_tile_highlights(self) -> tuple[int, int] | None:
         """Draw the hovered and selected placement tiles."""
         hovered_tile = self.screen_to_tile(pygame.mouse.get_pos())
@@ -153,6 +335,7 @@ class ArenaViewer:
         """Render one frame."""
         self.draw_arena()
         hovered_tile = self.draw_tile_highlights()
+        self.draw_towers()
         self.draw_status(hovered_tile)
         pygame.display.flip()
 
