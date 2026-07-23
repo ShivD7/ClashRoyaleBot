@@ -1,18 +1,21 @@
-from arena_viewer import ArenaViewer, SCREEN_HEIGHT, TOWERS
+from arena_viewer import SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE, TOWERS, ArenaViewer
 
 
 def test_screen_positions_convert_to_expected_tiles() -> None:
     assert ArenaViewer.screen_to_tile((0, 0)) == (0, 0)
     assert ArenaViewer.screen_to_tile((24, 24)) == (0, 0)
     assert ArenaViewer.screen_to_tile((25, 25)) == (1, 1)
-    assert ArenaViewer.screen_to_tile((449, 799)) == (17, 31)
+    assert ArenaViewer.screen_to_tile((449, SCREEN_HEIGHT - 1)) == (
+        17,
+        (SCREEN_HEIGHT - 1) // TILE_SIZE,
+    )
 
 
 def test_positions_outside_arena_are_rejected() -> None:
     assert ArenaViewer.screen_to_tile((-1, 0)) is None
     assert ArenaViewer.screen_to_tile((0, -1)) is None
     assert ArenaViewer.screen_to_tile((450, 0)) is None
-    assert ArenaViewer.screen_to_tile((0, 800)) is None
+    assert ArenaViewer.screen_to_tile((0, SCREEN_HEIGHT)) is None
 
 
 def test_arena_height_matches_all_grid_rows() -> None:
@@ -36,3 +39,56 @@ def test_tower_layout_is_mirrored_across_the_arena() -> None:
     }
 
     assert red_towers == mirrored_blue_towers
+
+
+def test_towers_are_aligned_symmetrically_across_the_center_lane() -> None:
+    red_king = next(
+        tower for tower in TOWERS if tower.team == "red" and tower.kind == "king"
+    )
+    red_princess_towers = [
+        tower
+        for tower in TOWERS
+        if tower.team == "red" and tower.kind == "princess"
+    ]
+
+    left_tower, right_tower = sorted(
+        red_princess_towers,
+        key=lambda tower: tower.center[0],
+    )
+
+    assert red_king.center[0] == SCREEN_WIDTH // 2
+    assert left_tower.center[1] == right_tower.center[1]
+    assert left_tower.center[0] + right_tower.center[0] == SCREEN_WIDTH
+
+
+def test_bridges_align_with_princess_tower_lanes_and_span_river() -> None:
+    red_princess_x_positions = sorted(
+        tower.center[0]
+        for tower in TOWERS
+        if tower.team == "red" and tower.kind == "princess"
+    )
+    river = ArenaViewer.river_rectangle()
+    bridges = ArenaViewer.bridge_rectangles()
+
+    assert [bridge.centerx for bridge in bridges] == red_princess_x_positions
+
+    for bridge in bridges:
+        assert bridge.centery == river.centery
+        assert bridge.top < river.top
+        assert bridge.bottom > river.bottom
+
+
+def test_ground_units_can_cross_only_at_bridges() -> None:
+    river = ArenaViewer.river_rectangle()
+    left_bridge, right_bridge = ArenaViewer.bridge_rectangles()
+
+    assert ArenaViewer.is_walkable_position(left_bridge.center)
+    assert ArenaViewer.is_walkable_position(right_bridge.center)
+    assert not ArenaViewer.is_walkable_position((SCREEN_WIDTH // 2, river.centery))
+    assert ArenaViewer.is_walkable_position((SCREEN_WIDTH // 2, river.top - 1))
+
+
+def test_river_is_centered_vertically() -> None:
+    river = ArenaViewer.river_rectangle()
+
+    assert river.centery == SCREEN_HEIGHT // 2
