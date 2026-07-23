@@ -1,4 +1,13 @@
-from arena_viewer import SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE, TOWERS, ArenaViewer
+from arena_viewer import (
+    MATCH_DURATION_SECONDS,
+    ArenaViewer,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    TILE_SIZE,
+    TOWERS,
+    format_match_time,
+    remaining_match_seconds,
+)
 
 
 def test_screen_positions_convert_to_expected_tiles() -> None:
@@ -92,3 +101,24 @@ def test_river_is_centered_vertically() -> None:
     river = ArenaViewer.river_rectangle()
 
     assert river.centery == SCREEN_HEIGHT // 2
+
+
+def test_match_duration_is_three_minutes() -> None:
+    assert MATCH_DURATION_SECONDS == 180
+
+
+def test_match_timer_counts_down_and_stops_at_zero() -> None:
+    start_ms = 1_000
+
+    assert remaining_match_seconds(start_ms, start_ms) == 180
+    assert remaining_match_seconds(start_ms, start_ms + 1_000) == 179
+    assert remaining_match_seconds(start_ms, start_ms + 179_001) == 1
+    assert remaining_match_seconds(start_ms, start_ms + 180_000) == 0
+    assert remaining_match_seconds(start_ms, start_ms + 999_999) == 0
+
+
+def test_match_timer_uses_minutes_and_zero_padded_seconds() -> None:
+    assert format_match_time(180) == "3:00"
+    assert format_match_time(125) == "2:05"
+    assert format_match_time(9) == "0:09"
+    assert format_match_time(0) == "0:00"

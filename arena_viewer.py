@@ -15,6 +15,7 @@ TILE_SIZE = 25
 RIVER_HEIGHT = TILE_SIZE * 2
 RIVER_TOP = (SCREEN_HEIGHT - RIVER_HEIGHT) // 2
 FPS = 60
+MATCH_DURATION_SECONDS = 3 * 60
 
 ARENA_COLOR = (74, 145, 82)
 ALTERNATE_TILE_COLOR = (78, 151, 86)
@@ -38,6 +39,10 @@ BLUE_TEAM_COLOR = (45, 111, 196)
 BLUE_TEAM_LIGHT_COLOR = (74, 157, 229)
 CROWN_COLOR = (255, 205, 54)
 CROWN_SHADOW_COLOR = (193, 128, 28)
+TIMER_PANEL_COLOR = (16, 18, 20)
+TIMER_BORDER_COLOR = (72, 77, 82)
+TIMER_SHADOW_COLOR = (0, 0, 0, 125)
+TIMER_URGENT_COLOR = (255, 92, 84)
 
 LEFT_LANE_X = (SCREEN_WIDTH // 4) // TILE_SIZE * TILE_SIZE + TILE_SIZE // 2
 RIGHT_LANE_X = SCREEN_WIDTH - LEFT_LANE_X
@@ -75,6 +80,19 @@ TOWERS = (
 )
 
 
+def remaining_match_seconds(start_ms: int, now_ms: int) -> int:
+    """Return whole seconds left in a three-minute match."""
+    elapsed_ms = max(0, now_ms - start_ms)
+    remaining_ms = max(0, MATCH_DURATION_SECONDS * 1000 - elapsed_ms)
+    return (remaining_ms + 999) // 1000
+
+
+def format_match_time(seconds: int) -> str:
+    """Format a countdown value as M:SS."""
+    minutes, seconds_part = divmod(max(0, seconds), 60)
+    return f"{minutes}:{seconds_part:02d}"
+
+
 class ArenaViewer:
     """Display and interact with a grid-based arena."""
 
@@ -85,6 +103,13 @@ class ArenaViewer:
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 26)
+        self.timer_label_font = pygame.font.Font(None, 19)
+        self.timer_label_font.set_bold(True)
+        self.timer_font = pygame.font.Font(None, 42)
+        self.timer_font.set_bold(True)
+        self.match_over_font = pygame.font.Font(None, 52)
+        self.match_over_font.set_bold(True)
+        self.match_started_at = pygame.time.get_ticks()
         self.running = True
         self.selected_tile: tuple[int, int] | None = None
 
@@ -454,12 +479,94 @@ class ArenaViewer:
         self.screen.blit(background, (6, 6))
         self.screen.blit(text_surface, (14, 11))
 
+    def draw_match_timer(self) -> None:
+        """Draw the match countdown in the upper-right corner."""
+        seconds_left = remaining_match_seconds(
+            self.match_started_at,
+            pygame.time.get_ticks(),
+        )
+
+        panel = pygame.Rect(SCREEN_WIDTH - 111, 6, 105, 63)
+        shadow = pygame.Surface((panel.width + 6, panel.height + 6), pygame.SRCALPHA)
+        pygame.draw.rect(
+            shadow,
+            TIMER_SHADOW_COLOR,
+            shadow.get_rect(),
+            border_radius=7,
+        )
+        self.screen.blit(shadow, (panel.x + 3, panel.y + 4))
+
+        pygame.draw.rect(self.screen, TIMER_BORDER_COLOR, panel, border_radius=6)
+        pygame.draw.rect(
+            self.screen,
+            TIMER_PANEL_COLOR,
+            panel.inflate(-6, -6),
+            border_radius=4,
+        )
+
+        label = self.timer_label_font.render("Time left", True, TEXT_COLOR)
+        label_position = (
+            panel.centerx - label.get_width() // 2,
+            panel.y + 5,
+        )
+        self.screen.blit(label, label_position)
+
+        timer_color = TIMER_URGENT_COLOR if seconds_left <= 10 else TEXT_COLOR
+        time_text = self.timer_font.render(
+            format_match_time(seconds_left),
+            True,
+            timer_color,
+        )
+        time_position = (
+            panel.centerx - time_text.get_width() // 2,
+            panel.y + 22,
+        )
+        self.screen.blit(time_text, time_position)
+
+        if seconds_left == 0:
+            self.draw_match_over()
+
+    def draw_match_over(self) -> None:
+        """Display a centered banner after the countdown reaches zero."""
+        banner_text = self.match_over_font.render("MATCH OVER", True, TEXT_COLOR)
+        banner = pygame.Rect(
+            0,
+            0,
+            banner_text.get_width() + 34,
+            banner_text.get_height() + 20,
+        )
+        banner.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+        overlay = pygame.Surface(banner.size, pygame.SRCALPHA)
+        pygame.draw.rect(
+            overlay,
+            TIMER_SHADOW_COLOR,
+            overlay.get_rect(),
+            border_radius=9,
+        )
+        pygame.draw.rect(
+            overlay,
+            TIMER_BORDER_COLOR,
+            overlay.get_rect(),
+            3,
+            border_radius=9,
+        )
+        overlay.blit(
+            banner_text,
+            (
+                (banner.width - banner_text.get_width()) // 2,
+                (banner.height - banner_text.get_height()) // 2,
+            ),
+        )
+        self.screen.blit(overlay, banner.topleft)
+
     def draw(self) -> None:
         """Render one frame."""
         self.draw_arena()
         hovered_tile = self.draw_tile_highlights()
         self.draw_towers()
         self.draw_status(hovered_tile)
+        self.draw_match_timer()
         pygame.display.flip()
 
     def run(self) -> None:
