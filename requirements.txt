@@ -1,0 +1,16 @@
+# Simulation and numerical state
+numpy>=2.0,<3.0
+
+# Reinforcement-learning environment APIs
+gymnasium>=1.2,<2.0
+pettingzoo>=1.25,<2.0
+
+# Neural networks and reinforcement-learning algorithms
+torch>=2.8,<3.0
+stable-baselines3>=2.9,<3.0
+sb3-contrib>=2.9,<3.0
+
+# Configuration, experiment logging, and optional visualization
+PyYAML>=6.0,<7.0
+tensorboard>=2.19,<3.0
+pygame-ce>=2.5,<3.0

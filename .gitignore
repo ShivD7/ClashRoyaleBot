@@ -1,0 +1,16 @@
+.venv/
+.worktrees/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.coverage
+htmlcov/
+
+checkpoints/
+runs/
+logs/
+*.pt
+*.pth
+*.zip
