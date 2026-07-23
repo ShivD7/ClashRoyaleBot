@@ -1,13 +1,37 @@
-"""Basic phone-sized grid arena for the simulator."""
+"""Show and run the Clash Royale-style arena.
+
+This file is split into five main parts:
+
+1. Settings for the screen, game rules, and colors.
+2. Classes that store tower and Elixir data.
+3. Helper functions for the match timer.
+4. The ``ArenaViewer`` class, which handles input, updates, and drawing.
+5. The ``main`` function, which starts the game.
+
+For each frame, the game checks input, updates its data, and redraws the screen.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import math
 
 import pygame
 
+from battle_engine import (
+    BattleEngine,
+    BattleEntity,
+    SpellStats,
+    UnitStats,
+)
 
+
+# ---------------------------------------------------------------------------
+# Screen and arena settings
+# ---------------------------------------------------------------------------
+# The arena has 18 columns and 32 rows. Position (0, 0) is the top-left corner.
+# X moves to the right, and Y moves down.
 SCREEN_WIDTH = 450
 SCREEN_HEIGHT = 800
 GRID_COLUMNS = 18
@@ -15,9 +39,16 @@ GRID_ROWS = 32
 TILE_SIZE = 25
 RIVER_HEIGHT = TILE_SIZE * 2
 RIVER_TOP = (SCREEN_HEIGHT - RIVER_HEIGHT) // 2
+# Destroying an enemy Princess Tower unlocks that lane from the river to one
+# grid row below the midpoint of the enemy half. The small offset keeps the
+# forward placement boundary from reaching too deeply into enemy territory.
+ENEMY_DEPLOYMENT_UNLOCK_TOP = math.ceil(
+    (RIVER_TOP / 2) / TILE_SIZE,
+) * TILE_SIZE + TILE_SIZE
 FPS = 60
 MATCH_DURATION_SECONDS = 3 * 60
 
+# All colors are kept here so they are easy to find and change.
 ARENA_COLOR = (74, 145, 82)
 ALTERNATE_TILE_COLOR = (78, 151, 86)
 RIVER_COLOR = (56, 144, 201)
@@ -27,9 +58,9 @@ BRIDGE_PLANK_LIGHT_COLOR = (213, 151, 87)
 BRIDGE_EDGE_COLOR = (101, 64, 42)
 GRID_COLOR = (42, 91, 51)
 HOVER_COLOR = (255, 255, 255, 75)
+RESTRICTED_TILE_COLOR = (255, 110, 110, 78)
 SELECTED_COLOR = (255, 218, 71)
 TEXT_COLOR = (245, 245, 245)
-TEXT_BACKGROUND_COLOR = (20, 35, 24, 185)
 STONE_COLOR = (207, 196, 170)
 STONE_SHADOW_COLOR = (135, 125, 107)
 STONE_HIGHLIGHT_COLOR = (235, 226, 204)
@@ -45,6 +76,11 @@ TIMER_BORDER_COLOR = (72, 77, 82)
 TIMER_SHADOW_COLOR = (0, 0, 0, 125)
 TIMER_URGENT_COLOR = (255, 92, 84)
 
+# ---------------------------------------------------------------------------
+# Arena layout
+# ---------------------------------------------------------------------------
+# These positions place the towers and bridges in the middle of their tiles.
+# Reusing them keeps the towers and bridges lined up.
 LEFT_LANE_X = (SCREEN_WIDTH // 4) // TILE_SIZE * TILE_SIZE + TILE_SIZE // 2
 RIGHT_LANE_X = SCREEN_WIDTH - LEFT_LANE_X
 CENTER_LANE_X = SCREEN_WIDTH // 2
@@ -52,6 +88,12 @@ TOP_KING_Y = TILE_SIZE * 4
 TOP_PRINCESS_Y = TILE_SIZE * 8
 BRIDGE_WIDTH = TILE_SIZE * 2
 BRIDGE_HEIGHT = RIVER_HEIGHT + TILE_SIZE
+
+# ---------------------------------------------------------------------------
+# Elixir settings and colors
+# ---------------------------------------------------------------------------
+# Elixir uses decimal values so it can fill smoothly. The bar only shows the
+# whole number. Triple Elixir is included in case overtime is added later.
 ELIXIR_MAX = 10.0
 ELIXIR_START = 5.0
 ELIXIR_SECONDS_PER_UNIT = 2.8
@@ -63,26 +105,141 @@ ELIXIR_DARK_COLOR = (85, 24, 105)
 ELIXIR_EMPTY_COLOR = (48, 27, 64)
 ELIXIR_FRAME_COLOR = (30, 18, 40)
 
+# The temporary card HUD sits immediately above the Elixir bar. Keeping these
+# measurements together makes both drawing and mouse hit-testing use the same
+# rectangles.
+HAND_HUD_TOP = SCREEN_HEIGHT - 153
+CARD_WIDTH = 72
+CARD_HEIGHT = 84
+CARD_GAP = 6
+CARD_START_X = 8
+NEXT_CARD_X = 360
+# Affordable cards use this normal dark-blue face.
+CARD_BACKGROUND_COLOR = (45, 53, 66)
+# Unaffordable cards start darker and receive the transparent overlay below.
+CARD_DISABLED_COLOR = (27, 30, 37)
+CARD_BORDER_COLOR = (188, 198, 214)
+# The fourth number is alpha: 0 is invisible and 255 is completely opaque.
+# This layer darkens every part of an unaffordable card, not only its border.
+CARD_DISABLED_OVERLAY_COLOR = (5, 7, 10, 145)
+DEPLOYMENT_COLOR = (59, 135, 224)
 
+
+# ---------------------------------------------------------------------------
+# Game data
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Tower:
-    """A tower placed in the arena."""
+    """Store the type, team, and position of one tower.
+
+    ``kind`` is either king or princess. ``team`` is red or blue. ``center`` is
+    the tower's center point on the screen. Towers cannot be changed after they
+    are created because they do not move.
+    """
 
     kind: str
     team: str
     center: tuple[int, int]
 
 
+class PlacementRule(Enum):
+    """Describe which arena region accepts a card deployment.
+
+    Keeping placement policy separate from card type matters because future
+    cards may be exceptions. For example, a troop such as Miner can be allowed
+    anywhere even though ordinary troops must start in friendly territory.
+    """
+
+    FRIENDLY_TERRITORY = "friendly_territory"
+    ANYWHERE = "anywhere"
+
+
+@dataclass(frozen=True)
+class Card:
+    """Describe one reusable card and the rules its future entity will follow.
+
+    ``role`` is a strategic label, while the remaining fields are simulator
+    rules. Ground targeting includes ground troops and buildings. Spells have
+    no spawned units because they apply an effect directly to a chosen area.
+    """
+
+    name: str
+    elixir_cost: int
+    card_type: str
+    role: str
+    placement_rule: PlacementRule
+    target_priority: str
+    target_types: str
+    attack_style: str
+    unit_count: int
+    unit_stats: UnitStats | None
+    spell_stats: SpellStats | None
+
+
+@dataclass
+class CardCycle:
+    """Store the four-card hand and the four cards waiting behind it.
+
+    The original deck tuple never changes. ``hand`` and ``queue`` are the two
+    moving parts of the current match:
+
+    * ``hand`` contains the four cards the player can select.
+    * ``queue`` contains the next four cards in their exact cycle order.
+    """
+
+    deck: tuple[Card, ...]
+
+    def __post_init__(self) -> None:
+        """Build the starting hand and queue from an eight-card deck."""
+        if len(self.deck) != 8:
+            raise ValueError("A deck must contain exactly eight cards")
+
+        # The first four deck positions are visible immediately.
+        self.hand = list(self.deck[:4])
+        # The remaining four wait in order; queue[0] is always the next preview.
+        self.queue = list(self.deck[4:])
+
+    @property
+    def next_card(self) -> Card:
+        """Return the card that will enter the hand after the next play."""
+        return self.queue[0]
+
+    def play(self, hand_index: int) -> Card:
+        """Cycle a successfully played card to the back of the queue."""
+        if not 0 <= hand_index < len(self.hand):
+            raise IndexError("Hand index must be between 0 and 3")
+
+        # Save the card before overwriting its hand position.
+        played_card = self.hand[hand_index]
+        # The front queued card fills the exact hand slot that was just played.
+        self.hand[hand_index] = self.queue.pop(0)
+        # A played card must wait for all other queued cards before returning.
+        self.queue.append(played_card)
+        return played_card
+
+
+@dataclass(frozen=True)
+class Deployment:
+    """Record a temporary card marker placed on one arena tile."""
+
+    card: Card
+    tile: tuple[int, int]
+
+
 @dataclass
 class ElixirMeter:
-    """Track the player's continuously generated battle elixir."""
+    """Store the player's Elixir and handle adding or spending it.
+
+    This class does not draw anything. The game rules stay separate from the
+    Elixir bar, which makes them easier to test and reuse.
+    """
 
     amount: float = ELIXIR_START
     full_notice_remaining: float = 0.0
 
     @staticmethod
     def multiplier_at(match_elapsed: float) -> int:
-        """Return the standard battle multiplier at a match timestamp."""
+        """Return the Elixir speed for the given point in the match."""
         if match_elapsed >= TRIPLE_ELIXIR_START:
             return 3
         if match_elapsed >= DOUBLE_ELIXIR_START:
@@ -90,7 +247,11 @@ class ElixirMeter:
         return 1
 
     def update(self, delta_seconds: float, match_elapsed: float) -> None:
-        """Generate elixir, accounting for rate boundaries crossed by this tick."""
+        """Add the Elixir earned during one frame.
+
+        A frame may cross from normal speed into Double Elixir. If that happens,
+        the code splits the frame so each part uses the correct speed.
+        """
         if delta_seconds <= 0:
             return
 
@@ -105,6 +266,8 @@ class ElixirMeter:
         cursor = match_elapsed
         generated = 0.0
 
+        # Most frames use this loop once. A frame that crosses a speed change
+        # uses it more than once.
         while remaining > 0:
             if cursor < DOUBLE_ELIXIR_START:
                 boundary = DOUBLE_ELIXIR_START
@@ -124,6 +287,7 @@ class ElixirMeter:
 
         previous_amount = self.amount
         self.amount = min(ELIXIR_MAX, self.amount + generated)
+        # Show the full message only when the bar first reaches 10.
         if previous_amount < ELIXIR_MAX and self.amount >= ELIXIR_MAX:
             self.full_notice_remaining = 1.5
 
@@ -137,6 +301,118 @@ class ElixirMeter:
         return True
 
 
+# These are data-only placeholder cards. Adding sprites or unit behavior later
+# will not require changing CardCycle because it only cares about card order.
+DEFAULT_DECK = (
+    Card(
+        "Knight",
+        3,
+        "troop",
+        "mini_tank",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "ground",
+        "melee",
+        1,
+        UnitStats(1766, 202, 1.2, 1.0, 1.2),
+        None,
+    ),
+    Card(
+        "Archers",
+        3,
+        "troop",
+        "ranged_support",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "air_and_ground",
+        "ranged",
+        2,
+        UnitStats(304, 112, 0.9, 1.0, 5.0, 10.0),
+        None,
+    ),
+    Card(
+        "Giant",
+        5,
+        "troop",
+        "win_condition",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "buildings_only",
+        "ground",
+        "melee",
+        1,
+        UnitStats(4090, 253, 1.5, 0.75, 1.2),
+        None,
+    ),
+    Card(
+        "Fireball",
+        4,
+        "spell",
+        "big_spell",
+        PlacementRule.ANYWHERE,
+        "targeted_area",
+        "air_and_ground",
+        "area",
+        0,
+        None,
+        SpellStats(688, 207, 2.5),
+    ),
+    Card(
+        "Mini P.E.K.K.A",
+        4,
+        "troop",
+        "tank_killer",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "ground",
+        "melee",
+        1,
+        UnitStats(1390, 755, 1.6, 1.5, 0.8),
+        None,
+    ),
+    Card(
+        "Musketeer",
+        4,
+        "troop",
+        "ranged_support",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "air_and_ground",
+        "ranged",
+        1,
+        UnitStats(721, 217, 1.0, 1.0, 6.0, 1000 / 60),
+        None,
+    ),
+    Card(
+        "Skeletons",
+        1,
+        "troop",
+        "cycle_swarm",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "ground",
+        "melee",
+        3,
+        UnitStats(81, 81, 1.1, 1.5, 0.5),
+        None,
+    ),
+    Card(
+        "Zap",
+        2,
+        "spell",
+        "small_spell",
+        PlacementRule.ANYWHERE,
+        "targeted_area",
+        "air_and_ground",
+        "area",
+        0,
+        None,
+        SpellStats(192, 58, 2.5),
+    ),
+)
+
+
+# Define every tower in one place. The blue tower positions mirror the red
+# tower positions.
 TOWERS = (
     Tower("king", "red", (CENTER_LANE_X, TOP_KING_Y)),
     Tower("princess", "red", (LEFT_LANE_X, TOP_PRINCESS_Y)),
@@ -155,8 +431,15 @@ TOWERS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Match timer helpers
+# ---------------------------------------------------------------------------
 def remaining_match_seconds(start_ms: int, now_ms: int) -> int:
-    """Return whole seconds left in a three-minute match."""
+    """Return the number of full seconds left in the match.
+
+    This keeps ``3:00`` on screen for the first second. It does not show
+    ``0:00`` until the full three minutes have passed.
+    """
     elapsed_ms = max(0, now_ms - start_ms)
     remaining_ms = max(0, MATCH_DURATION_SECONDS * 1000 - elapsed_ms)
     return (remaining_ms + 999) // 1000
@@ -169,12 +452,18 @@ def format_match_time(seconds: int) -> str:
 
 
 class ArenaViewer:
-    """Display and interact with a grid-based arena."""
+    """Handle the game window, input, updates, and drawing.
+
+    Each drawing method adds one part of the screen. Parts drawn later appear
+    on top of parts drawn earlier.
+    """
 
     def __init__(self) -> None:
+        """Set up Pygame and create the starting game data."""
         pygame.init()
         pygame.display.set_caption("Royale Simulator - Grid Arena")
 
+        # Create the window and fonts once instead of rebuilding them each frame.
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 26)
@@ -184,17 +473,49 @@ class ArenaViewer:
         self.timer_font.set_bold(True)
         self.match_over_font = pygame.font.Font(None, 52)
         self.match_over_font.set_bold(True)
+
+        # Save the start time for the timer. Elixir tracks its own elapsed time.
         self.match_started_at = pygame.time.get_ticks()
         self.elixir_font = pygame.font.Font(None, 31)
         self.elixir_notice_font = pygame.font.Font(None, 25)
+        self.card_font = pygame.font.Font(None, 19)
+        self.card_cost_font = pygame.font.Font(None, 23)
         self.running = True
+        # selected_tile is visual feedback for the player's last arena click.
         self.selected_tile: tuple[int, int] | None = None
+        # None means that an arena click should not attempt to play a card.
+        self.selected_card_index: int | None = None
+        # Drag state is separate from selection so click-to-place still works.
+        self.dragged_card_index: int | None = None
+        self.drag_position: tuple[int, int] | None = None
         self.elixir = ElixirMeter()
+        # Each match gets new mutable hand/queue lists from the fixed deck.
+        self.card_cycle = CardCycle(DEFAULT_DECK)
+        # Deployment history is useful for replay/debugging. Mutable combat
+        # entities themselves live in BattleEngine.
+        self.deployments: list[Deployment] = []
+        self.battle = BattleEngine(
+            tile_size=TILE_SIZE,
+            screen_height=SCREEN_HEIGHT,
+            river_top=RIVER_TOP,
+            river_height=RIVER_HEIGHT,
+            bridge_x_positions=(LEFT_LANE_X, RIGHT_LANE_X),
+            tower_layout=tuple(
+                (tower.kind, tower.team, tower.center)
+                for tower in TOWERS
+            ),
+        )
         self.match_elapsed = 0.0
 
+    # ------------------------------------------------------------------
+    # Position and movement helpers
+    # ------------------------------------------------------------------
     @staticmethod
     def screen_to_tile(position: tuple[int, int]) -> tuple[int, int] | None:
-        """Convert a mouse position into a grid coordinate."""
+        """Change a screen position into a tile position.
+
+        Return ``None`` when the position is outside the arena.
+        """
         mouse_x, mouse_y = position
 
         if not (0 <= mouse_x < SCREEN_WIDTH and 0 <= mouse_y < SCREEN_HEIGHT):
@@ -222,7 +543,10 @@ class ArenaViewer:
 
     @staticmethod
     def bridge_rectangles() -> tuple[pygame.Rect, pygame.Rect]:
-        """Return bridge geometry centered on both princess-tower lanes."""
+        """Return rectangles for the left and right bridges.
+
+        A new pair is made each time, so callers can safely change their copies.
+        """
         bridges = []
 
         for center_x in (LEFT_LANE_X, RIGHT_LANE_X):
@@ -234,7 +558,10 @@ class ArenaViewer:
 
     @classmethod
     def is_walkable_position(cls, position: tuple[int, int]) -> bool:
-        """Return whether ground movement may occupy a screen position."""
+        """Check if a ground unit can stand at a screen position.
+
+        Units can move on grass and bridges. They cannot move through water.
+        """
         if cls.screen_to_tile(position) is None:
             return False
 
@@ -246,8 +573,204 @@ class ArenaViewer:
             for bridge in cls.bridge_rectangles()
         )
 
+    @classmethod
+    def is_valid_deployment_tile(
+        cls,
+        tile: tuple[int, int],
+        card: Card | None = None,
+        destroyed_enemy_lanes: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Check a tile against the selected card's placement behavior.
+
+        Area spells may target any arena tile. Troops use the blue player's
+        territory. Each destroyed enemy Princess Tower also unlocks the half of
+        enemy territory in that lane nearest the river. ``None`` keeps the
+        troop rule for callers that only need the default arena boundary.
+        """
+        column, row = tile
+        # Validate coordinates before creating a rectangle from them.
+        if not (0 <= column < GRID_COLUMNS and 0 <= row < GRID_ROWS):
+            return False
+
+        # With no card, use the ordinary troop boundary for generic arena
+        # checks. A selected card replaces that default with its own policy.
+        placement_rule = (
+            PlacementRule.FRIENDLY_TERRITORY
+            if card is None
+            else card.placement_rule
+        )
+
+        # Spells such as Fireball and Zap target a coordinate directly, so
+        # enemy territory, bridges, and river tiles are all legal destinations.
+        if placement_rule is PlacementRule.ANYWHERE:
+            return True
+
+        if placement_rule is PlacementRule.FRIENDLY_TERRITORY:
+            tile_rectangle = cls.tile_rectangle(tile)
+            river = cls.river_rectangle()
+
+            # Screen Y increases downward. The entire blue half remains legal.
+            if tile_rectangle.top >= river.bottom:
+                return True
+
+            # Water and bridge tiles are never valid troop deployment tiles.
+            if tile_rectangle.bottom > river.top:
+                return False
+
+            # The forward deployment area reaches halfway into the enemy half.
+            if tile_rectangle.top < ENEMY_DEPLOYMENT_UNLOCK_TOP:
+                return False
+
+            lane = (
+                "left"
+                if tile_rectangle.centerx < SCREEN_WIDTH // 2
+                else "right"
+            )
+            return lane in destroyed_enemy_lanes
+
+        # Every enum member should be handled above. Failing loudly makes newly
+        # added placement policies impossible to forget in this central method.
+        raise ValueError(f"Unsupported placement rule: {placement_rule}")
+
+    @classmethod
+    def restricted_deployment_tiles(
+        cls,
+        card: Card | None = None,
+        destroyed_enemy_lanes: frozenset[str] = frozenset(),
+    ) -> tuple[tuple[int, int], ...]:
+        """Return every grid tile rejected for a specific selected card."""
+        return tuple(
+            (column, row)
+            for row in range(GRID_ROWS)
+            for column in range(GRID_COLUMNS)
+            if not cls.is_valid_deployment_tile(
+                (column, row),
+                card,
+                destroyed_enemy_lanes,
+            )
+        )
+
+    def destroyed_enemy_princess_lanes(self) -> frozenset[str]:
+        """Return lanes whose red Princess Tower has been destroyed.
+
+        Placement reads this directly from combat health instead of maintaining
+        a second flag, so the allowed tiles update on the same frame as death.
+        """
+        battle = getattr(self, "battle", None)
+        if battle is None:
+            return frozenset()
+
+        destroyed_lanes = {
+            (
+                "left"
+                if entity.position.x < SCREEN_WIDTH // 2
+                else "right"
+            )
+            for entity in battle.entities
+            if (
+                entity.team == "red"
+                and entity.tower_kind == "princess"
+                and not entity.is_alive
+            )
+        }
+        return frozenset(destroyed_lanes)
+
+    @staticmethod
+    def hand_card_rectangles() -> tuple[pygame.Rect, ...]:
+        """Return the four card rectangles shared by drawing and mouse input."""
+        return tuple(
+            pygame.Rect(
+                CARD_START_X + index * (CARD_WIDTH + CARD_GAP),
+                HAND_HUD_TOP + 8,
+                CARD_WIDTH,
+                CARD_HEIGHT,
+            )
+            for index in range(4)
+        )
+
+    @classmethod
+    def hand_index_at(cls, position: tuple[int, int]) -> int | None:
+        """Return the hand slot clicked by the player, if there is one."""
+        for index, card_rectangle in enumerate(cls.hand_card_rectangles()):
+            if card_rectangle.collidepoint(position):
+                return index
+        return None
+
+    def try_play_selected_card(self, tile: tuple[int, int]) -> bool:
+        """Deploy the selected card and cycle only when every rule succeeds."""
+        if self.selected_card_index is None:
+            return False
+
+        # Read the selected card before cycling changes that hand position.
+        card = self.card_cycle.hand[self.selected_card_index]
+        # Apply troop/spell placement behavior before spending any Elixir.
+        if not self.is_valid_deployment_tile(
+            tile,
+            card,
+            self.destroyed_enemy_princess_lanes(),
+        ):
+            return False
+
+        # ElixirMeter leaves its value unchanged when the card is unaffordable.
+        if not self.elixir.spend(card.elixir_cost):
+            return False
+
+        # Everything below this point runs only after validation and payment.
+        self.deployments.append(Deployment(card, tile))
+        battle = getattr(self, "battle", None)
+        if battle is not None:
+            battle.deploy_card(
+                card,
+                "blue",
+                self.tile_rectangle(tile).center,
+            )
+        self.card_cycle.play(self.selected_card_index)
+        # Require a deliberate selection before another card can be played.
+        self.selected_card_index = None
+        return True
+
+    def begin_card_drag(
+        self,
+        hand_index: int,
+        position: tuple[int, int],
+    ) -> None:
+        """Select a hand card and begin following the pointer with it."""
+        if not 0 <= hand_index < len(self.card_cycle.hand):
+            raise IndexError("Hand index must be between 0 and 3")
+
+        self.selected_card_index = hand_index
+        self.dragged_card_index = hand_index
+        self.drag_position = position
+
+    def finish_card_drag(self, position: tuple[int, int]) -> bool:
+        """Drop the dragged card, deploying it only on a valid arena tile."""
+        if self.dragged_card_index is None:
+            return False
+
+        # Restore the dragged slot as the active selection before validation.
+        self.selected_card_index = self.dragged_card_index
+        self.dragged_card_index = None
+        self.drag_position = None
+
+        if position[1] >= HAND_HUD_TOP:
+            return False
+
+        tile = self.screen_to_tile(position)
+        if tile is None:
+            return False
+
+        self.selected_tile = tile
+        return self.try_play_selected_card(tile)
+
+    # ------------------------------------------------------------------
+    # Input
+    # ------------------------------------------------------------------
     def handle_events(self) -> None:
-        """Process window, keyboard, and mouse events."""
+        """Handle keyboard and mouse input for one frame.
+
+        Escape or Q quits. Space clears selections. Keys 1-4 or card clicks
+        select a hand slot. An arena click then attempts to deploy that card.
+        """
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -256,15 +779,51 @@ class ArenaViewer:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     self.running = False
                 elif event.key == pygame.K_SPACE:
+                    # Space cancels both selections without changing game state.
                     self.selected_tile = None
-                elif pygame.K_1 <= event.key <= pygame.K_9:
-                    self.elixir.spend(event.key - pygame.K_0)
+                    self.selected_card_index = None
+                    self.dragged_card_index = None
+                    self.drag_position = None
+                elif pygame.K_1 <= event.key <= pygame.K_4:
+                    # K_1 maps to list index 0, K_2 to index 1, and so on.
+                    self.selected_card_index = event.key - pygame.K_1
+                    self.dragged_card_index = None
+                    self.drag_position = None
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                self.selected_tile = self.screen_to_tile(event.pos)
+                # Check the hand before converting the click into an arena tile.
+                clicked_hand_index = self.hand_index_at(event.pos)
+                if clicked_hand_index is not None:
+                    self.begin_card_drag(clicked_hand_index, event.pos)
+                    continue
 
+                # The whole HUD is outside the playable arena, even though the
+                # screen-to-grid conversion can mathematically produce a tile.
+                if event.pos[1] >= HAND_HUD_TOP:
+                    continue
+
+                clicked_tile = self.screen_to_tile(event.pos)
+                if clicked_tile is not None:
+                    # Keep the outline even when the attempted play is invalid.
+                    self.selected_tile = clicked_tile
+                    self.try_play_selected_card(clicked_tile)
+
+            elif event.type == pygame.MOUSEMOTION:
+                if self.dragged_card_index is not None:
+                    self.drag_position = event.pos
+
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if self.dragged_card_index is not None:
+                    self.finish_card_drag(event.pos)
+
+    # ------------------------------------------------------------------
+    # Draw the arena and buildings
+    # ------------------------------------------------------------------
     def draw_arena(self) -> None:
-        """Draw the arena background and grid."""
+        """Draw the grass, river, grid, and bridges.
+
+        Bridges are drawn last so they appear on top of the water and grid.
+        """
         self.screen.fill(ARENA_COLOR)
 
         for row in range(GRID_ROWS):
@@ -311,7 +870,11 @@ class ArenaViewer:
         self.draw_bridges()
 
     def draw_bridges(self) -> None:
-        """Draw wooden crossings over the river in both tower lanes."""
+        """Draw a wooden bridge in each tower lane.
+
+        Each bridge uses rectangles and lines for its shadow, wood, rails, and
+        separate planks.
+        """
         for bridge in self.bridge_rectangles():
             shadow = bridge.move(3, 4)
             pygame.draw.rect(
@@ -366,7 +929,11 @@ class ArenaViewer:
         return BLUE_TEAM_COLOR, BLUE_TEAM_LIGHT_COLOR
 
     def draw_princess_tower(self, tower: Tower) -> None:
-        """Draw a thick stone princess tower with an archer platform."""
+        """Draw one princess tower.
+
+        Every shape starts from ``tower.center``. The same code can therefore
+        draw all four princess towers.
+        """
         center_x, center_y = tower.center
         team_color, team_light = self.team_colors(tower.team)
 
@@ -450,7 +1017,10 @@ class ArenaViewer:
         )
 
     def draw_king_tower(self, tower: Tower) -> None:
-        """Draw the larger central tower with battlements and a crown."""
+        """Draw one king tower.
+
+        It is wider than a princess tower and has a bigger doorway and crown.
+        """
         center_x, center_y = tower.center
         team_color, team_light = self.team_colors(tower.team)
 
@@ -509,15 +1079,170 @@ class ArenaViewer:
         pygame.draw.circle(self.screen, team_color, (center_x, crown_y + 12), 4)
 
     def draw_towers(self) -> None:
-        """Draw all six arena towers."""
-        for tower in TOWERS:
-            if tower.kind == "king":
+        """Draw living Crown Towers, rubble, activation state, and health."""
+        for entity in self.battle.entities:
+            if entity.tower_kind is None:
+                continue
+
+            center = (round(entity.position.x), round(entity.position.y))
+            tower = Tower(entity.tower_kind, entity.team, center)
+
+            if not entity.is_alive:
+                pygame.draw.circle(
+                    self.screen,
+                    TOWER_OPENING_COLOR,
+                    center,
+                    round(entity.radius),
+                )
+                pygame.draw.line(
+                    self.screen,
+                    STONE_SHADOW_COLOR,
+                    (center[0] - 16, center[1] - 12),
+                    (center[0] + 17, center[1] + 13),
+                    6,
+                )
+                continue
+
+            if entity.tower_kind == "king":
                 self.draw_king_tower(tower)
             else:
                 self.draw_princess_tower(tower)
 
-    def draw_tile_highlights(self) -> tuple[int, int] | None:
-        """Draw the hovered and selected placement tiles."""
+            self.draw_health_bar(entity, width=58)
+
+    def draw_health_bar(
+        self,
+        entity: BattleEntity,
+        *,
+        width: int = 34,
+    ) -> None:
+        """Draw a compact health bar immediately above one living entity."""
+        if not entity.is_alive:
+            return
+
+        height = 5
+        center_x = round(entity.position.x)
+        top = round(entity.position.y - entity.radius - 12)
+        background = pygame.Rect(center_x - width // 2, top, width, height)
+        ratio = max(0.0, min(1.0, entity.health / entity.max_health))
+        remaining_width = round((width - 2) * ratio)
+
+        pygame.draw.rect(
+            self.screen,
+            (37, 42, 44),
+            background,
+            border_radius=2,
+        )
+        if remaining_width > 0:
+            health_color = (
+                BLUE_TEAM_LIGHT_COLOR
+                if entity.team == "blue"
+                else RED_TEAM_LIGHT_COLOR
+            )
+            pygame.draw.rect(
+                self.screen,
+                health_color,
+                (
+                    background.x + 1,
+                    background.y + 1,
+                    remaining_width,
+                    height - 2,
+                ),
+                border_radius=1,
+            )
+
+    def draw_units(self) -> None:
+        """Draw each living troop as a distinct, state-driven arena marker."""
+        unit_colors = {
+            "Knight": (84, 132, 201),
+            "Archers": (130, 212, 160),
+            "Giant": (205, 145, 82),
+            "Mini P.E.K.K.A": (83, 93, 119),
+            "Musketeer": (135, 101, 188),
+            "Skeletons": (226, 224, 211),
+        }
+
+        for entity in self.battle.entities:
+            if entity.is_building or not entity.is_alive:
+                continue
+
+            base_name = entity.name.rsplit(" ", 1)[0]
+            if base_name not in unit_colors:
+                base_name = entity.name
+            center = (round(entity.position.x), round(entity.position.y))
+            team_outline = (
+                BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
+            )
+
+            pygame.draw.circle(
+                self.screen,
+                team_outline,
+                center,
+                round(entity.radius) + 3,
+            )
+            pygame.draw.circle(
+                self.screen,
+                unit_colors.get(base_name, STONE_COLOR),
+                center,
+                round(entity.radius),
+            )
+
+            initials = "".join(
+                word[0]
+                for word in base_name.replace(".", "").split()
+            )[:2]
+            label = self.card_font.render(initials, True, TOWER_OPENING_COLOR)
+            self.screen.blit(label, label.get_rect(center=center))
+            self.draw_health_bar(entity)
+
+    def draw_projectiles(self) -> None:
+        """Draw arrows and ranged shots as small moving rectangles."""
+        for projectile in self.battle.projectiles:
+            center = (
+                round(projectile.position.x),
+                round(projectile.position.y),
+            )
+            pygame.draw.rect(
+                self.screen,
+                projectile.color,
+                pygame.Rect(center[0] - 5, center[1] - 2, 10, 4),
+                border_radius=2,
+            )
+
+    # ------------------------------------------------------------------
+    # Draw selection and game information
+    # ------------------------------------------------------------------
+    def draw_restricted_placement_tiles(self) -> None:
+        """Tint unavailable placement tiles while a hand card is selected."""
+        if self.selected_card_index is None:
+            return
+
+        selected_card = self.card_cycle.hand[self.selected_card_index]
+        overlay = pygame.Surface(
+            (SCREEN_WIDTH, SCREEN_HEIGHT),
+            pygame.SRCALPHA,
+        )
+
+        for tile in self.restricted_deployment_tiles(
+            selected_card,
+            self.destroyed_enemy_princess_lanes(),
+        ):
+            # A one-pixel inset preserves clear grid lines under the tint.
+            restricted_area = self.tile_rectangle(tile).inflate(-2, -2)
+            pygame.draw.rect(
+                overlay,
+                RESTRICTED_TILE_COLOR,
+                restricted_area,
+            )
+
+        self.screen.blit(overlay, (0, 0))
+
+    def draw_tile_highlights(self) -> None:
+        """Show the tile under the mouse and the selected tile.
+
+        The mouse highlight is see-through. The selected tile uses a solid
+        border and stays selected until it is cleared.
+        """
         hovered_tile = self.screen_to_tile(pygame.mouse.get_pos())
 
         if hovered_tile is not None:
@@ -539,29 +1264,13 @@ class ArenaViewer:
                 3,
             )
 
-        return hovered_tile
-
-    def draw_status(self, hovered_tile: tuple[int, int] | None) -> None:
-        """Display simple interaction instructions and coordinates."""
-        if hovered_tile is None:
-            coordinate_text = "Tile: outside arena"
-        else:
-            coordinate_text = f"Tile: x={hovered_tile[0]}, y={hovered_tile[1]}"
-
-        message = f"{coordinate_text} | 1-9: spend | Space: clear | Esc: quit"
-        text_surface = self.font.render(message, True, TEXT_COLOR)
-
-        background = pygame.Surface(
-            (text_surface.get_width() + 16, text_surface.get_height() + 10),
-            pygame.SRCALPHA,
-        )
-        background.fill(TEXT_BACKGROUND_COLOR)
-
-        self.screen.blit(background, (6, 6))
-        self.screen.blit(text_surface, (14, 11))
-
     def draw_match_timer(self) -> None:
-        """Draw the match countdown in the upper-right corner."""
+        """Draw the match timer in the top-right corner.
+
+        The timer uses real elapsed time, so slow frames do not make the match
+        longer. The numbers turn red for the last ten seconds. At zero, the
+        match-over message appears.
+        """
         seconds_left = remaining_match_seconds(
             self.match_started_at,
             pygame.time.get_ticks(),
@@ -608,7 +1317,7 @@ class ArenaViewer:
             self.draw_match_over()
 
     def draw_match_over(self) -> None:
-        """Display a centered banner after the countdown reaches zero."""
+        """Show a see-through message in the center when time runs out."""
         banner_text = self.match_over_font.render("MATCH OVER", True, TEXT_COLOR)
         banner = pygame.Rect(
             0,
@@ -641,8 +1350,193 @@ class ArenaViewer:
         )
         self.screen.blit(overlay, banner.topleft)
 
+    def draw_card(
+        self,
+        card: Card,
+        rectangle: pygame.Rect,
+        *,
+        selected: bool = False,
+        key_number: int | None = None,
+        show_affordability: bool = True,
+    ) -> None:
+        """Draw one placeholder card with cost and affordability feedback.
+
+        Only the four playable hand cards use affordability dimming. The next
+        preview cannot be played yet, so dimming it would incorrectly suggest
+        that clicking it should do something.
+        """
+        # The tiny tolerance matches ElixirMeter.spend and avoids a floating-point
+        # value such as 2.999999999 making a three-Elixir card appear disabled.
+        affordable = (
+            not show_affordability
+            or self.elixir.amount + 1e-9 >= card.elixir_cost
+        )
+        background = (
+            CARD_BACKGROUND_COLOR if affordable else CARD_DISABLED_COLOR
+        )
+        border = SELECTED_COLOR if selected else CARD_BORDER_COLOR
+
+        # Draw the card face first; labels and badges are layered on top of it.
+        pygame.draw.rect(self.screen, background, rectangle, border_radius=7)
+
+        if key_number is not None:
+            # The printed number teaches the matching 1-4 keyboard shortcut.
+            key_label = self.card_font.render(str(key_number), True, TEXT_COLOR)
+            self.screen.blit(key_label, (rectangle.x + 6, rectangle.y + 5))
+
+        # The cost badge is a temporary stand-in for the familiar Elixir icon.
+        cost_center = (rectangle.right - 13, rectangle.y + 13)
+        pygame.draw.circle(self.screen, ELIXIR_COLOR, cost_center, 11)
+        cost_label = self.card_cost_font.render(
+            str(card.elixir_cost),
+            True,
+            TEXT_COLOR,
+        )
+        self.screen.blit(cost_label, cost_label.get_rect(center=cost_center))
+
+        # Split longer names over two centered lines instead of shrinking them.
+        words = card.name.split()
+        if len(words) > 1:
+            name_lines = (words[0], " ".join(words[1:]))
+        else:
+            name_lines = (card.name,)
+
+        first_line_y = rectangle.centery - 5 * len(name_lines)
+        for line_index, line in enumerate(name_lines):
+            name_label = self.card_font.render(line, True, TEXT_COLOR)
+            name_rectangle = name_label.get_rect(
+                center=(
+                    rectangle.centerx,
+                    first_line_y + line_index * 17,
+                )
+            )
+            self.screen.blit(name_label, name_rectangle)
+
+        type_label = self.card_font.render(
+            card.card_type.title(),
+            True,
+            CARD_BORDER_COLOR,
+        )
+        self.screen.blit(
+            type_label,
+            type_label.get_rect(
+                center=(rectangle.centerx, rectangle.bottom - 11),
+            ),
+        )
+
+        if not affordable:
+            # A per-card alpha surface dims the face, text, type, and Elixir badge
+            # together. It is recreated here because each card rectangle may have
+            # a different size (the next-card preview is shorter).
+            dim_overlay = pygame.Surface(rectangle.size, pygame.SRCALPHA)
+            dim_overlay.fill(CARD_DISABLED_OVERLAY_COLOR)
+            self.screen.blit(dim_overlay, rectangle.topleft)
+
+        # Draw the border last so a selected-but-unaffordable card remains easy to
+        # identify even though its contents are deliberately darkened.
+        pygame.draw.rect(
+            self.screen,
+            border,
+            rectangle,
+            4 if selected else 2,
+            border_radius=7,
+        )
+
+    def draw_card_hand(self) -> None:
+        """Draw four selectable cards and preview the next queued card."""
+        # This translucent panel separates the hand from the active arena.
+        hud = pygame.Surface((SCREEN_WIDTH, 100), pygame.SRCALPHA)
+        hud.fill((18, 22, 30, 225))
+        self.screen.blit(hud, (0, HAND_HUD_TOP))
+
+        # zip pairs each live hand position with the matching clickable rectangle.
+        for index, (card, rectangle) in enumerate(
+            zip(self.card_cycle.hand, self.hand_card_rectangles())
+        ):
+            # The floating drag preview is the card itself, so do not leave a
+            # duplicate copy behind in its hand slot.
+            if index == self.dragged_card_index:
+                pygame.draw.rect(
+                    self.screen,
+                    CARD_DISABLED_COLOR,
+                    rectangle,
+                    border_radius=7,
+                )
+                pygame.draw.rect(
+                    self.screen,
+                    CARD_BORDER_COLOR,
+                    rectangle,
+                    1,
+                    border_radius=7,
+                )
+                continue
+
+            self.draw_card(
+                card,
+                rectangle,
+                selected=index == self.selected_card_index,
+                key_number=index + 1,
+            )
+
+        # The next preview is deliberately smaller and has no keyboard number.
+        next_label = self.card_font.render("NEXT", True, TEXT_COLOR)
+        next_rectangle = pygame.Rect(
+            NEXT_CARD_X,
+            HAND_HUD_TOP + 25,
+            CARD_WIDTH,
+            CARD_HEIGHT - 17,
+        )
+        self.screen.blit(
+            next_label,
+            next_label.get_rect(
+                center=(next_rectangle.centerx, HAND_HUD_TOP + 14),
+            ),
+        )
+        self.draw_card(
+            self.card_cycle.next_card,
+            next_rectangle,
+            show_affordability=False,
+        )
+
+    def draw_dragged_card(self) -> None:
+        """Draw the active card above the pointer while it is being dragged."""
+        if self.dragged_card_index is None or self.drag_position is None:
+            return
+
+        card = self.card_cycle.hand[self.dragged_card_index]
+        preview = pygame.Rect(0, 0, CARD_WIDTH, CARD_HEIGHT)
+        preview.center = (
+            self.drag_position[0],
+            self.drag_position[1] - CARD_HEIGHT // 2,
+        )
+        preview.clamp_ip(self.screen.get_rect())
+
+        shadow = pygame.Surface(
+            (preview.width + 10, preview.height + 10),
+            pygame.SRCALPHA,
+        )
+        pygame.draw.rect(
+            shadow,
+            (0, 0, 0, 105),
+            shadow.get_rect(),
+            border_radius=10,
+        )
+        self.screen.blit(shadow, (preview.x + 5, preview.y + 7))
+
+        self.draw_card(
+            card,
+            preview,
+            selected=True,
+            show_affordability=False,
+        )
+
     def draw_elixir_bar(self) -> None:
-        """Draw the segmented purple elixir meter used on the player's HUD."""
+        """Draw the purple Elixir bar at the bottom of the screen.
+
+        The ten boxes show the ten available Elixir units. The current box can
+        be partly full because Elixir grows smoothly. The number on the left
+        shows the amount the player can spend right now.
+        """
         hud = pygame.Surface((SCREEN_WIDTH, 53), pygame.SRCALPHA)
         hud.fill((18, 13, 28, 215))
         self.screen.blit(hud, (0, SCREEN_HEIGHT - 53))
@@ -658,6 +1552,7 @@ class ArenaViewer:
         gap = 2
         cell_width = (bar_rect.width - gap * 9) / 10
         for index in range(10):
+            # Round each box edge so all ten boxes fit the bar exactly.
             cell_x = round(bar_rect.x + index * (cell_width + gap))
             next_x = round(bar_rect.x + (index + 1) * cell_width + index * gap)
             cell = pygame.Rect(cell_x, bar_rect.y, next_x - cell_x, bar_rect.height)
@@ -745,6 +1640,7 @@ class ArenaViewer:
             )
 
         if self.elixir.full_notice_remaining > 0:
+            # The ElixirMeter decides how long this message stays visible.
             notice = self.elixir_notice_font.render(
                 "Elixir bar is full!",
                 True,
@@ -761,22 +1657,41 @@ class ArenaViewer:
             self.screen.blit(shadow, notice_rect.move(2, 2))
             self.screen.blit(notice, notice_rect)
 
+    # ------------------------------------------------------------------
+    # Draw frames and run the game
+    # ------------------------------------------------------------------
     def draw(self) -> None:
-        """Render one frame."""
+        """Draw one complete frame.
+
+        The arena is drawn first. Highlights, towers, and game information are
+        drawn afterward so they appear on top.
+        """
         self.draw_arena()
-        hovered_tile = self.draw_tile_highlights()
+        self.draw_restricted_placement_tiles()
         self.draw_towers()
-        self.draw_status(hovered_tile)
+        self.draw_units()
+        self.draw_projectiles()
+        self.draw_tile_highlights()
         self.draw_match_timer()
+        self.draw_card_hand()
         self.draw_elixir_bar()
+        self.draw_dragged_card()
         pygame.display.flip()
 
     def run(self) -> None:
-        """Run the viewer until the user closes it."""
+        """Keep updating and drawing until the window closes.
+
+        ``Clock.tick`` limits the game to the target frame rate and tells us how
+        long the last frame took. Elixir uses that time, so it fills at the same
+        speed even if the frame rate changes.
+        """
         while self.running:
             delta_seconds = self.clock.tick(FPS) / 1000.0
             self.handle_events()
+
+            # Update the game before drawing the new values.
             self.elixir.update(delta_seconds, self.match_elapsed)
+            self.battle.update(delta_seconds)
             self.match_elapsed += delta_seconds
             self.draw()
 
@@ -784,8 +1699,10 @@ class ArenaViewer:
 
 
 def main() -> None:
+    """Create and start the game."""
     ArenaViewer().run()
 
 
+# Start the game only when this file is run directly.
 if __name__ == "__main__":
     main()
