@@ -59,6 +59,7 @@ ENEMY_DEPLOYMENT_UNLOCK_TOP = math.ceil(
 ) * TILE_SIZE + TILE_SIZE
 FPS = 60
 MATCH_DURATION_SECONDS = 3 * 60
+OVERTIME_DURATION_SECONDS = 2 * 60
 
 # All colors are kept here so they are easy to find and change.
 ARENA_COLOR = (74, 145, 82)
@@ -118,7 +119,8 @@ ELIXIR_MAX = 10.0
 ELIXIR_START = 5.0
 ELIXIR_SECONDS_PER_UNIT = 2.8
 DOUBLE_ELIXIR_START = 120.0
-TRIPLE_ELIXIR_START = 240.0
+# Overtime starts at 3:00; Triple Elixir begins one minute into that phase.
+TRIPLE_ELIXIR_START = MATCH_DURATION_SECONDS + 60.0
 ELIXIR_COLOR = (220, 52, 213)
 ELIXIR_HIGHLIGHT_COLOR = (255, 115, 241)
 ELIXIR_DARK_COLOR = (85, 24, 105)
@@ -465,14 +467,18 @@ TOWERS = (
 # ---------------------------------------------------------------------------
 # Match timer helpers
 # ---------------------------------------------------------------------------
-def remaining_match_seconds(start_ms: int, now_ms: int) -> int:
-    """Return the number of full seconds left in the match.
+def remaining_match_seconds(
+    start_ms: int,
+    now_ms: int,
+    duration_seconds: int = MATCH_DURATION_SECONDS,
+) -> int:
+    """Return the number of full seconds left in a timed match phase.
 
     This keeps ``3:00`` on screen for the first second. It does not show
     ``0:00`` until the full three minutes have passed.
     """
     elapsed_ms = max(0, now_ms - start_ms)
-    remaining_ms = max(0, MATCH_DURATION_SECONDS * 1000 - elapsed_ms)
+    remaining_ms = max(0, duration_seconds * 1000 - elapsed_ms)
     return (remaining_ms + 999) // 1000
 
 
@@ -553,6 +559,8 @@ class ArenaViewer:
         self.match_finished = False
         self.match_winner: str | None = None
         self.match_finished_at_ms: int | None = None
+        self.overtime_active = False
+        self.overtime_started_at_ms: int | None = None
 
     # ------------------------------------------------------------------
     # Position and movement helpers
@@ -799,19 +807,61 @@ class ArenaViewer:
         return True
 
     def update_match_state(self, now_ms: int | None = None) -> None:
-        """Finish the match when time expires or either King Tower dies."""
+        """Advance regulation/overtime state and finish when a side wins."""
         if self.match_finished:
             return
 
         current_ms = pygame.time.get_ticks() if now_ms is None else now_ms
         winner = self.battle.winning_team
-        time_expired = remaining_match_seconds(
+        if winner is not None:
+            self.finish_match(winner, current_ms)
+            return
+
+        scores = self.battle.crown_scores
+        score_winner = None
+        if scores["red"] > scores["blue"]:
+            score_winner = "red"
+        elif scores["blue"] > scores["red"]:
+            score_winner = "blue"
+
+        if self.overtime_active:
+            # Overtime is sudden death: the first new Crown lead wins.
+            if score_winner is not None:
+                self.finish_match(score_winner, current_ms)
+                return
+
+            if self.overtime_started_at_ms is None:
+                raise RuntimeError("Overtime is active without a start time")
+            overtime_expired = remaining_match_seconds(
+                self.overtime_started_at_ms,
+                current_ms,
+                OVERTIME_DURATION_SECONDS,
+            ) == 0
+            if overtime_expired:
+                self.finish_match(None, current_ms)
+            return
+
+        regulation_expired = remaining_match_seconds(
             self.match_started_at,
             current_ms,
         ) == 0
-        if winner is None and not time_expired:
+        if not regulation_expired:
             return
 
+        if score_winner is not None:
+            self.finish_match(score_winner, current_ms)
+            return
+
+        # Tied regulation scores earn exactly two additional minutes. Anchor
+        # the phase to the regulation deadline so a slow frame cannot shorten
+        # or lengthen overtime.
+        self.overtime_active = True
+        self.overtime_started_at_ms = (
+            self.match_started_at + MATCH_DURATION_SECONDS * 1000
+        )
+
+    def finish_match(self, winner: str | None, current_ms: int) -> None:
+        """Store a terminal result and cancel all pending player interaction."""
         self.match_finished = True
         self.match_winner = winner
         self.match_finished_at_ms = current_ms
@@ -1512,10 +1562,21 @@ class ArenaViewer:
             if self.match_finished_at_ms is not None
             else pygame.time.get_ticks()
         )
-        seconds_left = remaining_match_seconds(
-            self.match_started_at,
-            timer_now_ms,
-        )
+        if self.overtime_active:
+            if self.overtime_started_at_ms is None:
+                raise RuntimeError("Overtime is active without a start time")
+            seconds_left = remaining_match_seconds(
+                self.overtime_started_at_ms,
+                timer_now_ms,
+                OVERTIME_DURATION_SECONDS,
+            )
+            timer_label = "Overtime"
+        else:
+            seconds_left = remaining_match_seconds(
+                self.match_started_at,
+                timer_now_ms,
+            )
+            timer_label = "Time left"
 
         panel = pygame.Rect(SCREEN_WIDTH - 111, 6, 105, 63)
         shadow = pygame.Surface((panel.width + 6, panel.height + 6), pygame.SRCALPHA)
@@ -1535,7 +1596,7 @@ class ArenaViewer:
             border_radius=4,
         )
 
-        label = self.timer_label_font.render("Time left", True, TEXT_COLOR)
+        label = self.timer_label_font.render(timer_label, True, TEXT_COLOR)
         label_position = (
             panel.centerx - label.get_width() // 2,
             panel.y + 5,

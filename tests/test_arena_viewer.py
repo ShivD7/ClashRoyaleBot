@@ -16,6 +16,7 @@ from arena_viewer import (
     HUD_HEIGHT,
     LEFT_LANE_X,
     MATCH_DURATION_SECONDS,
+    OVERTIME_DURATION_SECONDS,
     RIGHT_LANE_X,
     ArenaViewer,
     CardCycle,
@@ -27,6 +28,7 @@ from arena_viewer import (
     SCREEN_WIDTH,
     TILE_SIZE,
     TOWERS,
+    TRIPLE_ELIXIR_START,
     WINDOW_HEIGHT,
     WINDOW_SCALE,
     WINDOW_WIDTH,
@@ -541,6 +543,78 @@ def test_match_duration_is_three_minutes() -> None:
     assert MATCH_DURATION_SECONDS == 180
 
 
+def make_match_state_viewer(
+    *,
+    red_crowns: int,
+    blue_crowns: int,
+) -> ArenaViewer:
+    """Build the state needed to test match phases without opening a window."""
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.match_finished = False
+    viewer.match_winner = None
+    viewer.match_finished_at_ms = None
+    viewer.match_started_at = 1_000
+    viewer.overtime_active = False
+    viewer.overtime_started_at_ms = None
+    viewer.battle = SimpleNamespace(
+        winning_team=None,
+        crown_scores={"red": red_crowns, "blue": blue_crowns},
+    )
+    viewer.selected_card_index = None
+    viewer.dragged_card_index = None
+    viewer.drag_position = None
+    viewer.elixir_multiplier_notice = None
+    viewer.elixir_multiplier_notice_remaining = 0.0
+    return viewer
+
+
+def test_tied_regulation_score_starts_two_minute_overtime() -> None:
+    viewer = make_match_state_viewer(red_crowns=1, blue_crowns=1)
+
+    viewer.update_match_state(now_ms=181_000)
+
+    assert viewer.overtime_active
+    assert viewer.overtime_started_at_ms == 181_000
+    assert not viewer.match_finished
+    assert remaining_match_seconds(
+        viewer.overtime_started_at_ms,
+        181_000,
+        OVERTIME_DURATION_SECONDS,
+    ) == 120
+
+
+def test_regulation_crown_leader_wins_without_overtime() -> None:
+    viewer = make_match_state_viewer(red_crowns=1, blue_crowns=2)
+
+    viewer.update_match_state(now_ms=181_000)
+
+    assert viewer.match_finished
+    assert viewer.match_winner == "blue"
+    assert not viewer.overtime_active
+
+
+def test_overtime_is_sudden_death_when_a_team_takes_crown_lead() -> None:
+    viewer = make_match_state_viewer(red_crowns=1, blue_crowns=1)
+    viewer.update_match_state(now_ms=181_000)
+    viewer.battle.crown_scores = {"red": 1, "blue": 2}
+
+    viewer.update_match_state(now_ms=200_000)
+
+    assert viewer.match_finished
+    assert viewer.match_winner == "blue"
+
+
+def test_tied_overtime_ends_after_exactly_two_minutes() -> None:
+    viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
+    viewer.update_match_state(now_ms=181_000)
+
+    viewer.update_match_state(now_ms=301_000)
+
+    assert viewer.match_finished
+    assert viewer.match_winner is None
+    assert viewer.match_finished_at_ms == 301_000
+
+
 def test_match_timer_counts_down_and_stops_at_zero() -> None:
     start_ms = 1_000
 
@@ -575,6 +649,24 @@ def test_elixir_generation_uses_double_and_triple_rates() -> None:
 
     assert double_meter.amount == pytest.approx(1.0)
     assert triple_meter.amount == pytest.approx(3.0)
+
+
+def test_triple_elixir_starts_one_minute_into_overtime_with_notice() -> None:
+    assert TRIPLE_ELIXIR_START == MATCH_DURATION_SECONDS + 60
+
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.elixir = ElixirMeter()
+    viewer.match_elapsed = TRIPLE_ELIXIR_START - 0.25
+    viewer.elixir_multiplier_notice = None
+    viewer.elixir_multiplier_notice_remaining = 0.0
+
+    viewer.update_elixir_multiplier_notice(0.5)
+
+    assert viewer.elixir_multiplier_notice == 3
+    assert (
+        viewer.elixir_multiplier_notice_remaining
+        == ELIXIR_MULTIPLIER_NOTICE_SECONDS
+    )
 
 
 def test_elixir_generation_accounts_for_rate_boundary_in_same_tick() -> None:
