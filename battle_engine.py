@@ -97,7 +97,14 @@ class BattleEntity:
         if not self.is_alive:
             return
 
+        previous_health = self.health
         self.health = max(0.0, self.health - amount)
+        # A sleeping King Tower wakes as soon as an enemy damages it. Keeping
+        # this rule in the shared damage method covers spells, troops, and
+        # projectiles without requiring separate activation checks for each.
+        if self.tower_kind == "king" and self.health < previous_health:
+            self.active = True
+
         if self.health == 0:
             self.state = EntityState.DEAD
             self.target_id = None
@@ -265,7 +272,8 @@ class BattleEngine:
             radius=30.0 if is_king else 23.0,
             is_building=True,
             tower_kind=tower_kind,
-            # King Towers wake only after one allied Princess Tower is destroyed.
+            # King Towers wake after taking damage or losing an allied Princess
+            # Tower. Princess Towers begin active.
             active=not is_king,
         )
         self.entities.append(entity)
@@ -667,7 +675,11 @@ class BattleEngine:
         self.projectiles = survivors
 
     def _activate_king_towers(self) -> None:
-        """Wake each King Tower after either allied Princess Tower dies."""
+        """Wake each King Tower after either allied Princess Tower dies.
+
+        Direct damage wakes a King Tower inside ``take_damage``. This method
+        handles the other activation rule, which depends on allied tower state.
+        """
         for king in (
             entity
             for entity in self.entities
