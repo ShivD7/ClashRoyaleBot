@@ -1003,20 +1003,15 @@ class ArenaViewer:
             if in_friendly_half:
                 return True
 
-            # River-row tiles are blocked unless a troop is being placed on a
-            # bridge. Checking the tile center prevents nearby water tiles that
-            # only touch a bridge edge from being accepted.
+            # Bridges are movement paths, not deployment zones. Reject every
+            # unit card in the river rows so spawned bodies always begin on
+            # open grass. Spells returned above remain targetable everywhere.
             intersects_river = (
                 tile_rectangle.bottom > river.top
                 and tile_rectangle.top < river.bottom
             )
             if intersects_river:
-                is_troop = card is None or card.card_type == "troop"
-                is_on_bridge = any(
-                    bridge.collidepoint(tile_rectangle.center)
-                    for bridge in cls.bridge_rectangles()
-                )
-                return is_troop and is_on_bridge
+                return False
 
             # Destroyed Princess Towers unlock a mirrored forward rectangle.
             in_forward_depth = (

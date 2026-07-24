@@ -10,6 +10,7 @@ from arena_viewer import (
     RIVER_TOP,
     TILE_SIZE,
     TOWERS,
+    ArenaViewer,
 )
 from battle_engine import BattleEngine, EntityState
 
@@ -325,6 +326,71 @@ def test_light_unit_yields_more_than_heavy_unit_during_collision() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("blue_start_y", "red_start_y"),
+    (
+        (350, 250),
+        (470, 330),
+    ),
+)
+def test_opposing_giants_slide_past_instead_of_deadlocking(
+    blue_start_y: int,
+    red_start_y: int,
+) -> None:
+    engine = make_engine()
+    for entity in engine.entities:
+        if entity.is_building:
+            entity.damage = 0
+    blue_giant = engine.deploy_card(
+        card_named("Giant"),
+        "blue",
+        (LEFT_LANE_X, blue_start_y),
+    )[0]
+    red_giant = engine.deploy_card(
+        card_named("Giant"),
+        "red",
+        (LEFT_LANE_X, red_start_y),
+    )[0]
+    maximum_lateral_separation = 0.0
+
+    for _ in range(160):
+        engine.update(0.05)
+        maximum_lateral_separation = max(
+            maximum_lateral_separation,
+            abs(blue_giant.position.x - red_giant.position.x),
+        )
+
+    assert blue_giant.target_id != red_giant.entity_id
+    assert red_giant.target_id != blue_giant.entity_id
+    assert maximum_lateral_separation > 5
+    assert blue_giant.position.y < red_giant.position.y
+
+
+def test_opposing_troops_that_target_each_other_stop_and_fight() -> None:
+    engine = make_engine()
+    blue_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    red_knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 480),
+    )[0]
+    blue_start = blue_knight.position.copy()
+    red_start = red_knight.position.copy()
+
+    engine.update(0.01)
+
+    assert blue_knight.target_id == red_knight.entity_id
+    assert red_knight.target_id == blue_knight.entity_id
+    assert blue_knight.state is EntityState.ATTACKING
+    assert red_knight.state is EntityState.ATTACKING
+    assert blue_knight.position == blue_start
+    assert red_knight.position == red_start
+
+
 def test_ground_and_air_units_can_share_the_same_position() -> None:
     engine = make_engine()
     knight = engine.deploy_card(
@@ -397,8 +463,48 @@ def test_selected_bridge_lane_remains_stable_while_crossing() -> None:
     assert second_destination.x == chosen_lane
 
 
+@pytest.mark.parametrize(
+    ("team", "start_y", "crossed_bank"),
+    (
+        ("blue", RIVER_TOP + TILE_SIZE // 2, "top"),
+        (
+            "red",
+            RIVER_TOP + RIVER_HEIGHT - TILE_SIZE // 2,
+            "bottom",
+        ),
+    ),
+)
+@pytest.mark.parametrize("lane_x", (LEFT_LANE_X, RIGHT_LANE_X))
+def test_troop_deployed_on_bridge_walks_off_the_opposite_end(
+    team: str,
+    start_y: int,
+    crossed_bank: str,
+    lane_x: int,
+) -> None:
+    engine = make_engine()
+    for entity in engine.entities:
+        if entity.is_building:
+            entity.damage = 0
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        team,
+        (lane_x, start_y),
+    )[0]
+
+    for _ in range(80):
+        engine.update(0.05)
+
+    if crossed_bank == "top":
+        assert knight.position.y + knight.radius < RIVER_TOP
+    else:
+        assert knight.position.y - knight.radius > RIVER_TOP + RIVER_HEIGHT
+
+
 def test_bridge_congestion_keeps_units_from_stacking() -> None:
     engine = make_engine()
+    for entity in engine.entities:
+        if entity.is_building:
+            entity.damage = 0
     units = [
         engine.deploy_card(
             card_named("Knight"),
@@ -408,14 +514,58 @@ def test_bridge_congestion_keeps_units_from_stacking() -> None:
         for _ in range(5)
     ]
 
-    for _ in range(120):
+    for _ in range(400):
         engine.update(0.05)
 
+    assert all(unit.position.y < RIVER_TOP for unit in units)
     for index, first in enumerate(units):
         for second in units[index + 1:]:
             assert first.position.distance_to(second.position) >= (
                 first.radius + second.radius - 1e-6
             )
+
+
+@pytest.mark.parametrize("column", (4, 13))
+@pytest.mark.parametrize(
+    ("team", "building_row", "troop_rows", "crossed_bank"),
+    (
+        ("blue", 17, (19, 20, 21), "top"),
+        ("red", 14, (12, 11, 10), "bottom"),
+    ),
+)
+def test_troops_route_around_building_on_last_tile_before_bridge(
+    column: int,
+    team: str,
+    building_row: int,
+    troop_rows: tuple[int, ...],
+    crossed_bank: str,
+) -> None:
+    engine = make_engine()
+    for entity in engine.entities:
+        if entity.is_building:
+            entity.damage = 0
+    engine.deploy_card(
+        card_named("Cannon"),
+        team,
+        ArenaViewer.tile_rectangle((column, building_row)).center,
+    )
+    troops = [
+        engine.deploy_card(
+            card_named("Knight"),
+            team,
+            ArenaViewer.tile_rectangle((column, row)).center,
+        )[0]
+        for row in troop_rows
+    ]
+
+    for _ in range(400):
+        engine.update(0.05)
+
+    if crossed_bank == "top":
+        assert all(troop.position.y < RIVER_TOP for troop in troops)
+    else:
+        river_bottom = RIVER_TOP + RIVER_HEIGHT
+        assert all(troop.position.y > river_bottom for troop in troops)
 
 
 def test_knockback_interrupts_attack_and_respects_unit_resistance() -> None:

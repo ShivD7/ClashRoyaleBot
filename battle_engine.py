@@ -150,6 +150,10 @@ class BattleEngine:
     BUILDING_AVOIDANCE_TILES = 1.4
     BRIDGE_HALF_WIDTH_TILES = 1.0
     BRIDGE_CONGESTION_PENALTY_TILES = 0.35
+    # Non-engaging opponents may overlap slightly while sliding past. Full
+    # collision still applies to allies, buildings, and troops fighting one
+    # another.
+    PASSING_COLLISION_RATIO = 0.6
 
     def __init__(
         self,
@@ -679,7 +683,16 @@ class BattleEngine:
             )
 
         entry_tolerance = max(1.0, entity.movement_speed / 20)
-        if not inside_river and entity.position.distance_to(entry) > entry_tolerance:
+        reached_entry_bank = (
+            entity.position.y <= entry.y + entry_tolerance
+            if moving_up
+            else entity.position.y >= entry.y - entry_tolerance
+        )
+        # Test progress along the direction of travel instead of requiring the
+        # troop to touch one exact point. Collision separation can offset a
+        # queued unit sideways, and a point-distance check then makes adjacent
+        # units approach that waypoint from opposite directions forever.
+        if not inside_river and not reached_entry_bank:
             return entry
         return exit_point
 
@@ -744,7 +757,15 @@ class BattleEngine:
         speed = min(maximum_speed, distance / delta_seconds)
         direction = displacement.normalize()
         velocity = direction * speed
-        velocity += self._avoidance_velocity(entity, target, direction)
+        # Friendly units form a queue on the bridge. Opposing troops that are
+        # not fighting one another still receive controlled lateral steering so
+        # they can squeeze past instead of creating a permanent head-on wall.
+        velocity += self._avoidance_velocity(
+            entity,
+            target,
+            direction,
+            passing_opponents_only=self._is_in_bridge_corridor(entity),
+        )
 
         if velocity.length_squared() > maximum_speed * maximum_speed:
             velocity.scale_to_length(maximum_speed)
@@ -755,6 +776,8 @@ class BattleEngine:
         entity: BattleEntity,
         target: BattleEntity,
         travel_direction: pygame.Vector2,
+        *,
+        passing_opponents_only: bool = False,
     ) -> pygame.Vector2:
         """Steer around nearby bodies before collision actually occurs."""
         steering = pygame.Vector2()
@@ -763,6 +786,11 @@ class BattleEngine:
             if other.entity_id in {entity.entity_id, target.entity_id}:
                 continue
             if not self._shares_collision_layer(entity, other):
+                continue
+            if (
+                passing_opponents_only
+                and not self._can_slide_past(entity, other)
+            ):
                 continue
 
             offset = other.position - entity.position
@@ -795,7 +823,23 @@ class BattleEngine:
                 )
                 cross = travel_direction.cross(offset)
                 if abs(cross) <= 1e-6:
-                    side = -1.0 if entity.entity_id < other.entity_id else 1.0
+                    if entity.team != other.team:
+                        # The same travel-relative side sends head-on opponents
+                        # toward opposite world-space edges of the lane.
+                        lower_id, higher_id = sorted(
+                            (entity.entity_id, other.entity_id),
+                        )
+                        side = (
+                            -1.0
+                            if (lower_id * 31 + higher_id * 17) % 2
+                            else 1.0
+                        )
+                    else:
+                        side = (
+                            -1.0
+                            if entity.entity_id < other.entity_id
+                            else 1.0
+                        )
                 else:
                     side = -1.0 if cross > 0 else 1.0
                 strength = 0.8 if other.is_building else 0.45
@@ -883,6 +927,8 @@ class BattleEngine:
                 offset = second.position - first.position
                 distance = offset.length()
                 required_distance = first.radius + second.radius
+                if self._can_slide_past(first, second):
+                    required_distance *= self.PASSING_COLLISION_RATIO
                 if distance >= required_distance - 1e-6:
                     continue
 
@@ -945,6 +991,20 @@ class BattleEngine:
         )
         if entity.movement_type == "air":
             return
+
+        if self._is_in_bridge_corridor(entity):
+            # Keep a committed troop's whole circular body on the bridge or its
+            # approach. This prevents collision resolution from side-stepping a
+            # queued unit into water and leaving it trapped at the bank.
+            half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+            usable_half_width = max(0.0, half_width - entity.radius)
+            entity.position.x = min(
+                entity.lane_x + usable_half_width,
+                max(
+                    entity.lane_x - usable_half_width,
+                    entity.position.x,
+                ),
+            )
 
         entered_from_above = (
             previous_position.y + entity.radius <= self.river_top
@@ -1015,6 +1075,35 @@ class BattleEngine:
             candidates,
             key=lambda bridge_x: abs(entity.position.x - bridge_x),
         )
+
+    def _is_in_bridge_corridor(self, entity: BattleEntity) -> bool:
+        """Return whether a ground troop's body currently overlaps the river."""
+        if entity.movement_type != "ground" or entity.lane_x is None:
+            return False
+        return (
+            entity.position.y + entity.radius > self.river_top
+            and entity.position.y - entity.radius < self.river_bottom
+        )
+
+    @staticmethod
+    def _can_slide_past(
+        first: BattleEntity,
+        second: BattleEntity,
+    ) -> bool:
+        """Allow moving opponents that ignore each other to pass gradually."""
+        if first.team == second.team:
+            return False
+        if first.is_building or second.is_building:
+            return False
+        if first.state is not EntityState.MOVING:
+            return False
+        if second.state is not EntityState.MOVING:
+            return False
+        if first.target_id == second.entity_id:
+            return False
+        if second.target_id == first.entity_id:
+            return False
+        return True
 
     def apply_knockback(
         self,

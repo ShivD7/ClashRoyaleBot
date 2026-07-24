@@ -346,12 +346,11 @@ def test_spells_can_target_any_arena_tile_while_troops_cannot() -> None:
 
 
 @pytest.mark.parametrize("team", ("blue", "red"))
-def test_troops_can_be_deployed_on_bridges_but_not_in_water(
+def test_units_cannot_be_deployed_on_bridges_or_in_water(
     team: str,
 ) -> None:
     cards = {card.name: card for card in DEFAULT_DECK}
     river = ArenaViewer.river_rectangle()
-    bridges = ArenaViewer.bridge_rectangles()
     river_rows = range(
         river.top // TILE_SIZE,
         river.bottom // TILE_SIZE,
@@ -360,17 +359,12 @@ def test_troops_can_be_deployed_on_bridges_but_not_in_water(
     for row in river_rows:
         for column in range(GRID_COLUMNS):
             tile = (column, row)
-            tile_center = ArenaViewer.tile_rectangle(tile).center
-            is_on_bridge = any(
-                bridge.collidepoint(tile_center)
-                for bridge in bridges
-            )
 
             assert ArenaViewer.is_valid_deployment_tile(
                 tile,
                 cards["Knight"],
                 team=team,
-            ) is is_on_bridge
+            ) is False
 
 
 @pytest.mark.parametrize("team", ("blue", "red"))
