@@ -17,6 +17,7 @@ from arena_viewer import (
     LEFT_LANE_X,
     MATCH_DURATION_SECONDS,
     OVERTIME_DURATION_SECONDS,
+    OVERTIME_NOTICE_SECONDS,
     RIGHT_LANE_X,
     ArenaViewer,
     CardCycle,
@@ -400,6 +401,68 @@ def test_king_tower_winner_finishes_viewer_and_clears_card_interaction() -> None
     assert viewer.drag_position is None
 
 
+def test_match_result_reports_winner_or_draw_with_final_crown_score() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.battle = SimpleNamespace(crown_scores={"red": 1, "blue": 2})
+    viewer.match_winner = "blue"
+
+    assert viewer.match_result_text() == ("BLUE WINS", "RED 1  -  2 BLUE")
+
+    viewer.battle.crown_scores = {"red": 1, "blue": 1}
+    viewer.match_winner = None
+    assert viewer.match_result_text() == ("DRAW", "RED 1  -  1 BLUE")
+
+
+def test_play_again_resets_every_mutable_match_value() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    old_battle = viewer.create_battle_engine()
+    old_battle.entities[0].take_damage(old_battle.entities[0].max_health)
+    viewer.battle = old_battle
+    viewer.elixir = ElixirMeter(amount=1)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    viewer.card_cycle.play(0)
+    viewer.deployments = [SimpleNamespace()]
+    viewer.match_started_at = 1
+    viewer.match_elapsed = 250.0
+    viewer.match_finished = True
+    viewer.match_winner = "blue"
+    viewer.match_finished_at_ms = 251_000
+    viewer.overtime_active = True
+    viewer.overtime_started_at_ms = 181_000
+    viewer.selected_tile = (4, 20)
+    viewer.selected_card_index = 2
+    viewer.dragged_card_index = 2
+    viewer.drag_position = (200, 500)
+    viewer.elixir_multiplier_notice = 3
+    viewer.elixir_multiplier_notice_remaining = 1.0
+    viewer.overtime_notice_remaining = 1.0
+
+    viewer.reset_match(now_ms=999_000)
+
+    assert viewer.battle is not old_battle
+    assert len(viewer.battle.entities) == 6
+    assert all(entity.is_alive for entity in viewer.battle.entities)
+    assert viewer.battle.projectiles == []
+    assert viewer.elixir.amount == 5
+    assert viewer.card_cycle.hand == list(DEFAULT_DECK[:4])
+    assert viewer.card_cycle.queue == list(DEFAULT_DECK[4:])
+    assert viewer.deployments == []
+    assert viewer.match_started_at == 999_000
+    assert viewer.match_elapsed == 0
+    assert not viewer.match_finished
+    assert viewer.match_winner is None
+    assert viewer.match_finished_at_ms is None
+    assert not viewer.overtime_active
+    assert viewer.overtime_started_at_ms is None
+    assert viewer.selected_tile is None
+    assert viewer.selected_card_index is None
+    assert viewer.dragged_card_index is None
+    assert viewer.drag_position is None
+    assert viewer.elixir_multiplier_notice is None
+    assert viewer.elixir_multiplier_notice_remaining == 0
+    assert viewer.overtime_notice_remaining == 0
+
+
 def test_fireball_can_be_deployed_in_enemy_territory() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.selected_card_index = 3
@@ -556,6 +619,7 @@ def make_match_state_viewer(
     viewer.match_started_at = 1_000
     viewer.overtime_active = False
     viewer.overtime_started_at_ms = None
+    viewer.overtime_notice_remaining = 0.0
     viewer.battle = SimpleNamespace(
         winning_team=None,
         crown_scores={"red": red_crowns, "blue": blue_crowns},
@@ -575,12 +639,26 @@ def test_tied_regulation_score_starts_two_minute_overtime() -> None:
 
     assert viewer.overtime_active
     assert viewer.overtime_started_at_ms == 181_000
+    assert viewer.overtime_notice_remaining == OVERTIME_NOTICE_SECONDS
     assert not viewer.match_finished
     assert remaining_match_seconds(
         viewer.overtime_started_at_ms,
         181_000,
         OVERTIME_DURATION_SECONDS,
     ) == 120
+
+
+def test_overtime_announcement_counts_down_and_disappears() -> None:
+    viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
+    viewer.update_match_state(now_ms=181_000)
+
+    viewer.update_overtime_notice(1.25)
+    assert viewer.overtime_notice_remaining == pytest.approx(
+        OVERTIME_NOTICE_SECONDS - 1.25,
+    )
+
+    viewer.update_overtime_notice(10.0)
+    assert viewer.overtime_notice_remaining == 0
 
 
 def test_regulation_crown_leader_wins_without_overtime() -> None:

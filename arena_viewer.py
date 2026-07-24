@@ -131,6 +131,11 @@ ELIXIR_FRAME_COLOR = (30, 18, 40)
 ELIXIR_MULTIPLIER_NOTICE_SECONDS = 2.5
 ELIXIR_NOTICE_PANEL_COLOR = (31, 13, 45, 225)
 ELIXIR_NOTICE_BORDER_COLOR = (245, 92, 232)
+# Regulation-to-overtime feedback uses its own announcement so it remains
+# visually distinct from Double and Triple Elixir changes.
+OVERTIME_NOTICE_SECONDS = 1.5
+OVERTIME_NOTICE_PANEL_COLOR = (8, 9, 12, 235)
+OVERTIME_NOTICE_TEXT_COLOR = (244, 70, 70)
 
 # The temporary card HUD sits immediately above the Elixir bar. Keeping these
 # measurements together makes both drawing and mouse hit-testing use the same
@@ -544,7 +549,19 @@ class ArenaViewer:
         # Deployment history is useful for replay/debugging. Mutable combat
         # entities themselves live in BattleEngine.
         self.deployments: list[Deployment] = []
-        self.battle = BattleEngine(
+        self.battle = self.create_battle_engine()
+        self.match_elapsed = 0.0
+        self.match_finished = False
+        self.match_winner: str | None = None
+        self.match_finished_at_ms: int | None = None
+        self.overtime_active = False
+        self.overtime_started_at_ms: int | None = None
+        self.overtime_notice_remaining = 0.0
+
+    @staticmethod
+    def create_battle_engine() -> BattleEngine:
+        """Create a fresh combat world shared by startup and Play Again."""
+        return BattleEngine(
             tile_size=TILE_SIZE,
             screen_height=ARENA_HEIGHT,
             river_top=RIVER_TOP,
@@ -555,12 +572,52 @@ class ArenaViewer:
                 for tower in TOWERS
             ),
         )
+
+    def reset_match(self, now_ms: int | None = None) -> None:
+        """Reset every mutable episode value for a completely fresh rematch."""
+        self.battle = self.create_battle_engine()
+        self.elixir = ElixirMeter()
+        self.card_cycle = CardCycle(DEFAULT_DECK)
+        self.deployments = []
+
+        self.match_started_at = (
+            pygame.time.get_ticks()
+            if now_ms is None
+            else now_ms
+        )
         self.match_elapsed = 0.0
         self.match_finished = False
-        self.match_winner: str | None = None
-        self.match_finished_at_ms: int | None = None
+        self.match_winner = None
+        self.match_finished_at_ms = None
         self.overtime_active = False
-        self.overtime_started_at_ms: int | None = None
+        self.overtime_started_at_ms = None
+
+        self.selected_tile = None
+        self.selected_card_index = None
+        self.dragged_card_index = None
+        self.drag_position = None
+
+        self.elixir_multiplier_notice = None
+        self.elixir_multiplier_notice_remaining = 0.0
+        self.overtime_notice_remaining = 0.0
+
+    @staticmethod
+    def play_again_button_rectangle() -> pygame.Rect:
+        """Return the logical-space button used for drawing and hit testing."""
+        button = pygame.Rect(0, 0, 190, 44)
+        button.center = (SCREEN_WIDTH // 2, ARENA_HEIGHT // 2 + 70)
+        return button
+
+    def match_result_text(self) -> tuple[str, str]:
+        """Return the final outcome title and Crown score."""
+        scores = self.battle.crown_scores
+        title = (
+            f"{self.match_winner.upper()} WINS"
+            if self.match_winner is not None
+            else "DRAW"
+        )
+        score = f"RED {scores['red']}  -  {scores['blue']} BLUE"
+        return title, score
 
     # ------------------------------------------------------------------
     # Position and movement helpers
@@ -859,6 +916,7 @@ class ArenaViewer:
         self.overtime_started_at_ms = (
             self.match_started_at + MATCH_DURATION_SECONDS * 1000
         )
+        self.overtime_notice_remaining = OVERTIME_NOTICE_SECONDS
 
     def finish_match(self, winner: str | None, current_ms: int) -> None:
         """Store a terminal result and cancel all pending player interaction."""
@@ -875,6 +933,16 @@ class ArenaViewer:
         # temporary announcement on screen indefinitely.
         self.elixir_multiplier_notice = None
         self.elixir_multiplier_notice_remaining = 0.0
+        self.overtime_notice_remaining = 0.0
+
+    def update_overtime_notice(self, delta_seconds: float) -> None:
+        """Count down the temporary regulation-to-overtime announcement."""
+        if delta_seconds <= 0:
+            return
+        self.overtime_notice_remaining = max(
+            0.0,
+            self.overtime_notice_remaining - delta_seconds,
+        )
 
     def update_elixir_multiplier_notice(self, delta_seconds: float) -> None:
         """Start or count down the announcement for an Elixir speed change.
@@ -986,6 +1054,8 @@ class ArenaViewer:
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     self.running = False
+                elif self.match_finished:
+                    continue
                 elif event.key == pygame.K_SPACE:
                     # Space cancels both selections without changing game state.
                     self.selected_tile = None
@@ -1000,6 +1070,13 @@ class ArenaViewer:
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 logical_position = self.display_to_logical_position(event.pos)
+                if self.match_finished:
+                    if self.play_again_button_rectangle().collidepoint(
+                        logical_position,
+                    ):
+                        self.reset_match()
+                    continue
+
                 # Check the hand before converting the click into an arena tile.
                 clicked_hand_index = self.hand_index_at(logical_position)
                 if clicked_hand_index is not None:
@@ -1619,43 +1696,63 @@ class ArenaViewer:
             self.draw_match_over()
 
     def draw_match_over(self) -> None:
-        """Show the result after time expires or a King Tower is destroyed."""
-        result = (
-            f"{self.match_winner.upper()} WINS"
-            if self.match_winner is not None
-            else "MATCH OVER"
+        """Show the winner, final score, and Play Again action."""
+        title_text, score_text = self.match_result_text()
+        title_color = (
+            BLUE_TEAM_LIGHT_COLOR
+            if self.match_winner == "blue"
+            else RED_TEAM_LIGHT_COLOR
+            if self.match_winner == "red"
+            else CROWN_COLOR
         )
-        banner_text = self.match_over_font.render(result, True, TEXT_COLOR)
-        banner = pygame.Rect(
-            0,
-            0,
-            banner_text.get_width() + 34,
-            banner_text.get_height() + 20,
-        )
-        banner.center = (SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)
+        title = self.match_over_font.render(title_text, True, title_color)
+        score = self.font.render(score_text, True, TEXT_COLOR)
+        button_label = self.font.render("PLAY AGAIN", True, TEXT_COLOR)
 
-        overlay = pygame.Surface(banner.size, pygame.SRCALPHA)
+        # Dim only the battlefield; the permanent HUD and stadium counters stay
+        # visible behind the final result.
+        dimmer = pygame.Surface((ARENA_WIDTH, ARENA_HEIGHT), pygame.SRCALPHA)
+        dimmer.fill((0, 0, 0, 85))
+        self.screen.blit(dimmer, (ARENA_LEFT, 0))
+
+        panel = pygame.Rect(0, 0, 360, 220)
+        panel.center = (SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)
+        overlay = pygame.Surface(panel.size, pygame.SRCALPHA)
         pygame.draw.rect(
             overlay,
-            TIMER_SHADOW_COLOR,
+            (8, 10, 14, 235),
             overlay.get_rect(),
-            border_radius=9,
+            border_radius=12,
         )
         pygame.draw.rect(
             overlay,
             TIMER_BORDER_COLOR,
             overlay.get_rect(),
             3,
+            border_radius=12,
+        )
+        overlay.blit(title, title.get_rect(center=(panel.width // 2, 54)))
+        overlay.blit(score, score.get_rect(center=(panel.width // 2, 105)))
+        self.screen.blit(overlay, panel.topleft)
+
+        button = self.play_again_button_rectangle()
+        pygame.draw.rect(
+            self.screen,
+            BLUE_TEAM_COLOR,
+            button,
             border_radius=9,
         )
-        overlay.blit(
-            banner_text,
-            (
-                (banner.width - banner_text.get_width()) // 2,
-                (banner.height - banner_text.get_height()) // 2,
-            ),
+        pygame.draw.rect(
+            self.screen,
+            BLUE_TEAM_LIGHT_COLOR,
+            button,
+            3,
+            border_radius=9,
         )
-        self.screen.blit(overlay, banner.topleft)
+        self.screen.blit(
+            button_label,
+            button_label.get_rect(center=button.center),
+        )
 
     def draw_crown_scores(self) -> None:
         """Draw compact red and blue Crown counters on the arena's left edge."""
@@ -2165,6 +2262,58 @@ class ArenaViewer:
         )
         self.screen.blit(panel, panel_rectangle)
 
+    def draw_overtime_notice(self) -> None:
+        """Announce the start of overtime in a centered black rectangle."""
+        if self.overtime_notice_remaining <= 0:
+            return
+
+        fade_seconds = 0.5
+        alpha_fraction = min(
+            1.0,
+            self.overtime_notice_remaining / fade_seconds,
+        )
+        panel_alpha = round(255 * alpha_fraction)
+
+        title = self.elixir_multiplier_font.render(
+            "OVERTIME!",
+            True,
+            OVERTIME_NOTICE_TEXT_COLOR,
+        )
+        subtitle = self.font.render(
+            "SUDDEN DEATH - 2:00",
+            True,
+            OVERTIME_NOTICE_TEXT_COLOR,
+        )
+        title.set_alpha(panel_alpha)
+        subtitle.set_alpha(panel_alpha)
+
+        panel = pygame.Surface((330, 92), pygame.SRCALPHA)
+        pygame.draw.rect(
+            panel,
+            (
+                *OVERTIME_NOTICE_PANEL_COLOR[:3],
+                min(OVERTIME_NOTICE_PANEL_COLOR[3], panel_alpha),
+            ),
+            panel.get_rect(),
+            border_radius=10,
+        )
+        pygame.draw.rect(
+            panel,
+            (*OVERTIME_NOTICE_TEXT_COLOR, panel_alpha),
+            panel.get_rect(),
+            3,
+            border_radius=10,
+        )
+        panel.blit(title, title.get_rect(center=(panel.get_width() // 2, 33)))
+        panel.blit(
+            subtitle,
+            subtitle.get_rect(center=(panel.get_width() // 2, 68)),
+        )
+        self.screen.blit(
+            panel,
+            panel.get_rect(center=(SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)),
+        )
+
     # ------------------------------------------------------------------
     # Draw frames and run the game
     # ------------------------------------------------------------------
@@ -2185,6 +2334,7 @@ class ArenaViewer:
         self.draw_spell_radius_preview()
         self.draw_match_timer()
         self.draw_crown_scores()
+        self.draw_overtime_notice()
         # The temporary announcement belongs above arena action but below the
         # draggable card, which should always remain attached to the pointer.
         self.draw_elixir_multiplier_notice()
@@ -2218,6 +2368,7 @@ class ArenaViewer:
                 self.battle.update(delta_seconds)
                 self.match_elapsed += delta_seconds
                 self.update_match_state()
+                self.update_overtime_notice(delta_seconds)
             self.draw()
 
         pygame.quit()
