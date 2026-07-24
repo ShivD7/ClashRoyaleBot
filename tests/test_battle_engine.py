@@ -273,6 +273,252 @@ def test_fast_unit_moves_farther_than_slow_unit_in_same_time() -> None:
     assert mini_pekka_start.distance_to(mini_pekka.position) == pytest.approx(37.5)
 
 
+def test_overlapping_ground_units_are_separated_by_body_radius() -> None:
+    engine = make_engine()
+    first = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    second = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    first.movement_speed = 0
+    second.movement_speed = 0
+
+    engine.update(0.01)
+
+    assert first.position.distance_to(second.position) == pytest.approx(
+        first.radius + second.radius,
+    )
+
+
+def test_light_unit_yields_more_than_heavy_unit_during_collision() -> None:
+    engine = make_engine()
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    skeletons = engine.deploy_card(
+        card_named("Skeletons"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )
+    skeleton = skeletons[1]
+    skeletons[0].position.x -= 100
+    skeletons[2].position.x += 100
+    giant.movement_speed = 0
+    for small_unit in skeletons:
+        small_unit.movement_speed = 0
+    shared_start = giant.position.copy()
+
+    engine.update(0.01)
+
+    assert skeleton.position.distance_to(shared_start) > (
+        giant.position.distance_to(shared_start)
+    )
+    assert giant.position.distance_to(skeleton.position) == pytest.approx(
+        giant.radius + skeleton.radius,
+    )
+
+
+def test_ground_and_air_units_can_share_the_same_position() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    minions = engine.deploy_card(
+        card_named("Minions"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )
+    minion = minions[1]
+    minions[0].position.x -= 100
+    minions[2].position.x += 100
+    knight.movement_speed = 0
+    for flying_unit in minions:
+        flying_unit.movement_speed = 0
+
+    engine.update(0.01)
+
+    assert knight.position == minion.position
+
+
+def test_troop_steers_around_stationary_building() -> None:
+    engine = make_engine()
+    cannon = engine.deploy_card(
+        card_named("Cannon"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 560),
+    )[0]
+
+    for _ in range(80):
+        engine.update(0.05)
+
+    assert cannon.position == (LEFT_LANE_X, 500)
+    assert abs(knight.position.x - LEFT_LANE_X) > 5
+    assert knight.position.distance_to(cannon.position) >= (
+        knight.radius + cannon.radius
+    )
+
+
+def test_selected_bridge_lane_remains_stable_while_crossing() -> None:
+    engine = make_engine()
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    red_left_tower = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red"
+        and entity.tower_kind == "princess"
+        and entity.position.x == LEFT_LANE_X
+    )
+
+    first_destination = engine._movement_destination(giant, red_left_tower)
+    chosen_lane = giant.lane_x
+    giant.position.x = RIGHT_LANE_X
+    second_destination = engine._movement_destination(giant, red_left_tower)
+
+    assert chosen_lane == LEFT_LANE_X
+    assert first_destination.x == chosen_lane
+    assert second_destination.x == chosen_lane
+
+
+def test_bridge_congestion_keeps_units_from_stacking() -> None:
+    engine = make_engine()
+    units = [
+        engine.deploy_card(
+            card_named("Knight"),
+            "blue",
+            (LEFT_LANE_X, 600),
+        )[0]
+        for _ in range(5)
+    ]
+
+    for _ in range(120):
+        engine.update(0.05)
+
+    for index, first in enumerate(units):
+        for second in units[index + 1:]:
+            assert first.position.distance_to(second.position) >= (
+                first.radius + second.radius - 1e-6
+            )
+
+
+def test_knockback_interrupts_attack_and_respects_unit_resistance() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "blue",
+        (RIGHT_LANE_X, 500),
+    )[0]
+    knight_start = knight.position.copy()
+    giant_start = giant.position.copy()
+
+    assert engine.apply_knockback(
+        knight.entity_id,
+        (knight.position.x, knight.position.y + 20),
+        distance_tiles=2,
+    )
+    assert engine.apply_knockback(
+        giant.entity_id,
+        (giant.position.x, giant.position.y + 20),
+        distance_tiles=2,
+    )
+    engine.update(0.25)
+
+    assert knight.target_id is None
+    assert knight.position.distance_to(knight_start) > (
+        giant.position.distance_to(giant_start)
+    )
+
+
+def test_ground_knockback_cannot_push_a_unit_across_open_water() -> None:
+    engine = make_engine()
+    river_bottom = RIVER_TOP + RIVER_HEIGHT
+    between_bridges = (LEFT_LANE_X + RIGHT_LANE_X) / 2
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (between_bridges, river_bottom + 11),
+    )[0]
+    knight.movement_speed = 0
+
+    engine.apply_knockback(
+        knight.entity_id,
+        (knight.position.x, knight.position.y + 20),
+        distance_tiles=3,
+    )
+    engine.update(0.25)
+
+    assert knight.position.y == pytest.approx(river_bottom + knight.radius)
+
+
+def test_buildings_do_not_move_when_resolving_collisions() -> None:
+    engine = make_engine()
+    cannon = engine.deploy_card(
+        card_named("Cannon"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    cannon_start = cannon.position.copy()
+    knight.movement_speed = 0
+
+    engine.update(0.01)
+
+    assert cannon.position == cannon_start
+    assert cannon.position.distance_to(knight.position) == pytest.approx(
+        cannon.radius + knight.radius,
+    )
+
+
+def test_movement_and_collision_results_are_deterministic() -> None:
+    def run_scenario() -> tuple[tuple[float, float], ...]:
+        engine = make_engine()
+        for _ in range(4):
+            engine.deploy_card(
+                card_named("Knight"),
+                "blue",
+                (LEFT_LANE_X, 600),
+            )
+        engine.deploy_card(
+            card_named("Cannon"),
+            "blue",
+            (LEFT_LANE_X, 500),
+        )
+        for _ in range(80):
+            engine.update(0.05)
+        return tuple(
+            (entity.position.x, entity.position.y)
+            for entity in engine.entities
+        )
+
+    assert run_scenario() == run_scenario()
+
+
 def test_melee_damage_sets_health_to_zero_and_marks_target_dead() -> None:
     engine = make_engine()
     mini_pekka = engine.deploy_card(
@@ -464,6 +710,29 @@ def test_fireball_uses_reduced_damage_against_crown_towers() -> None:
     assert red_princess.health == starting_health - 207
 
 
+def test_fireball_knocks_surviving_troop_away_from_blast() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 500),
+    )[0]
+    starting_position = knight.position.copy()
+    blast_center = (LEFT_LANE_X - 20, 500)
+
+    engine.deploy_card(
+        card_named("Fireball"),
+        "blue",
+        blast_center,
+    )
+    assert knight.target_id is None
+
+    engine.update(0.25)
+
+    assert knight.position.x > starting_position.x
+    assert knight.position.y == pytest.approx(starting_position.y)
+
+
 def test_every_default_card_has_complete_combat_stats() -> None:
     for card in DEFAULT_DECK:
         if card.spell_stats is not None:
@@ -478,3 +747,6 @@ def test_every_default_card_has_complete_combat_stats() -> None:
                 assert card.unit_stats.movement_speed == 0
             else:
                 assert card.unit_stats.movement_speed > 0
+            assert card.unit_stats.body_radius > 0
+            assert card.unit_stats.mass > 0
+            assert 0 <= card.unit_stats.knockback_resistance <= 1
