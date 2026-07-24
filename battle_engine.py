@@ -33,6 +33,7 @@ class UnitStats:
     movement_speed: float
     attack_range: float
     projectile_speed: float = 0.0
+    sight_range: float = 5.5
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class BattleEntity:
     hit_speed: float
     movement_speed: float
     attack_range: float
+    sight_range: float
     projectile_speed: float
     target_priority: str
     target_types: str
@@ -252,6 +254,7 @@ class BattleEngine:
             ),
             movement_speed=0.0,
             attack_range=self.KING_RANGE if is_king else self.PRINCESS_RANGE,
+            sight_range=self.KING_RANGE if is_king else self.PRINCESS_RANGE,
             projectile_speed=self.TOWER_PROJECTILE_SPEED,
             target_priority="nearest_enemy",
             target_types="air_and_ground",
@@ -334,6 +337,7 @@ class BattleEngine:
             # Speeds in the source data use 60 as Medium, or one tile/second.
             movement_speed=stats.movement_speed * self.tile_size,
             attack_range=stats.attack_range,
+            sight_range=stats.sight_range,
             projectile_speed=stats.projectile_speed,
             target_priority=card.target_priority,
             target_types=card.target_types,
@@ -391,12 +395,22 @@ class BattleEngine:
             )
             target = self.entity_by_id(entity.target_id)
 
-            # A target lock ends only when that exact target dies or disappears.
             if target is None or not target.is_alive:
                 entity.target_id = None
                 entity.state = EntityState.RETARGETING
                 target = self._acquire_target(entity)
                 if target is not None:
+                    entity.target_id = target.entity_id
+            elif (
+                not entity.is_building
+                and entity.state is not EntityState.ATTACKING
+            ):
+                # A walking troop may be distracted by a closer eligible enemy
+                # inside its sight range. Once an attack begins, the target lock
+                # remains until that target dies or leaves the engagement.
+                closer_target = self._closer_visible_target(entity, target)
+                if closer_target is not None:
+                    target = closer_target
                     entity.target_id = target.entity_id
 
             if target is None:
@@ -419,21 +433,12 @@ class BattleEngine:
         self._activate_king_towers()
 
     def _acquire_target(self, entity: BattleEntity) -> BattleEntity | None:
-        """Choose the nearest eligible target when no lock currently exists."""
-        candidates = []
+        """Choose a visible enemy, falling back to the nearest Crown Tower."""
+        visible_candidates = []
+        crown_tower_candidates = []
 
         for candidate in self.living_entities:
-            if candidate.team == entity.team:
-                continue
-            if entity.target_priority == "buildings_only" and not candidate.is_building:
-                continue
-            # Crown Towers defend only against troops, not other buildings.
-            if entity.is_building and candidate.is_building:
-                continue
-            if (
-                entity.target_types == "ground"
-                and candidate.target_types == "air"
-            ):
+            if not self._is_eligible_target(entity, candidate):
                 continue
 
             distance = entity.position.distance_to(candidate.position)
@@ -442,13 +447,81 @@ class BattleEngine:
                 maximum += entity.radius + candidate.radius
                 if distance > maximum:
                     continue
+                visible_candidates.append(
+                    (distance, candidate.entity_id, candidate)
+                )
+                continue
+
+            sight_distance = entity.sight_range * self.tile_size
+            sight_distance += entity.radius + candidate.radius
+            if distance <= sight_distance:
+                visible_candidates.append(
+                    (distance, candidate.entity_id, candidate)
+                )
+
+            if candidate.tower_kind is not None:
+                crown_tower_candidates.append(
+                    (distance, candidate.entity_id, candidate)
+                )
+
+        # Entity ID breaks equal-distance ties deterministically.
+        if visible_candidates:
+            return min(
+                visible_candidates,
+                key=lambda item: (item[0], item[1]),
+            )[2]
+        if crown_tower_candidates:
+            return min(
+                crown_tower_candidates,
+                key=lambda item: (item[0], item[1]),
+            )[2]
+        return None
+
+    @staticmethod
+    def _is_eligible_target(
+        entity: BattleEntity,
+        candidate: BattleEntity,
+    ) -> bool:
+        """Return whether an entity is allowed to target this candidate."""
+        if candidate.team == entity.team:
+            return False
+        if entity.target_priority == "buildings_only" and not candidate.is_building:
+            return False
+        # Crown Towers defend only against troops, not other buildings.
+        if entity.is_building and candidate.is_building:
+            return False
+        if (
+            entity.target_types == "ground"
+            and candidate.target_types == "air"
+        ):
+            return False
+        return True
+
+    def _closer_visible_target(
+        self,
+        entity: BattleEntity,
+        current_target: BattleEntity,
+    ) -> BattleEntity | None:
+        """Find a closer eligible target seen by a troop while it is walking."""
+        current_distance = entity.position.distance_to(current_target.position)
+        candidates = []
+
+        for candidate in self.living_entities:
+            if candidate.entity_id == current_target.entity_id:
+                continue
+            if not self._is_eligible_target(entity, candidate):
+                continue
+
+            distance = entity.position.distance_to(candidate.position)
+            sight_distance = entity.sight_range * self.tile_size
+            sight_distance += entity.radius + candidate.radius
+            if distance > sight_distance or distance >= current_distance:
+                continue
 
             candidates.append((distance, candidate.entity_id, candidate))
 
         if not candidates:
             return None
-
-        # Entity ID breaks equal-distance ties deterministically.
         return min(candidates, key=lambda item: (item[0], item[1]))[2]
 
     def _is_in_attack_range(

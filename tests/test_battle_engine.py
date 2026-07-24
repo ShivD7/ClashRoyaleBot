@@ -54,7 +54,7 @@ def test_giant_ignores_troops_and_locks_nearest_enemy_building() -> None:
     assert target.tower_kind == "princess"
 
 
-def test_target_lock_does_not_switch_when_another_enemy_becomes_closer() -> None:
+def test_moving_unit_switches_to_closer_enemy_inside_sight_range() -> None:
     engine = make_engine()
     blue_knight = engine.deploy_card(
         card_named("Knight"),
@@ -64,7 +64,7 @@ def test_target_lock_does_not_switch_when_another_enemy_becomes_closer() -> None
     first_enemy = engine.deploy_card(
         card_named("Knight"),
         "red",
-        (LEFT_LANE_X, 500),
+        (LEFT_LANE_X, 400),
     )[0]
     second_enemy = engine.deploy_card(
         card_named("Knight"),
@@ -74,6 +74,35 @@ def test_target_lock_does_not_switch_when_another_enemy_becomes_closer() -> None
 
     engine.update(0.01)
     assert blue_knight.target_id == first_enemy.entity_id
+    assert blue_knight.state is EntityState.MOVING
+
+    second_enemy.position = blue_knight.position + (0, -30)
+    engine.update(0.01)
+
+    assert blue_knight.target_id == second_enemy.entity_id
+
+
+def test_attacking_unit_keeps_target_when_another_enemy_becomes_closer() -> None:
+    engine = make_engine()
+    blue_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    first_enemy = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 510),
+    )[0]
+    second_enemy = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (RIGHT_LANE_X, 550),
+    )[0]
+
+    engine.update(0.01)
+    assert blue_knight.target_id == first_enemy.entity_id
+    assert blue_knight.state is EntityState.ATTACKING
 
     second_enemy.position = blue_knight.position.copy()
     engine.update(0.01)
@@ -81,7 +110,7 @@ def test_target_lock_does_not_switch_when_another_enemy_becomes_closer() -> None
     assert blue_knight.target_id == first_enemy.entity_id
 
 
-def test_unit_retargets_only_after_locked_target_dies() -> None:
+def test_unit_retargets_after_locked_target_dies() -> None:
     engine = make_engine()
     attacker = engine.deploy_card(
         card_named("Knight"),
@@ -107,6 +136,26 @@ def test_unit_retargets_only_after_locked_target_dies() -> None:
 
     assert attacker.target_id == second_target.entity_id
     assert attacker.state is not EntityState.DEAD
+
+
+def test_enemy_outside_sight_range_does_not_distract_walking_unit() -> None:
+    engine = make_engine()
+    blue_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 600),
+    )[0]
+    engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 400),
+    )
+
+    engine.update(0.01)
+    target = engine.entity_by_id(blue_knight.target_id)
+
+    assert target is not None
+    assert target.tower_kind == "princess"
 
 
 def test_fast_unit_moves_farther_than_slow_unit_in_same_time() -> None:

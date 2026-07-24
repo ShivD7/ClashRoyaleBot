@@ -430,7 +430,7 @@ DEFAULT_DECK = (
         "ground",
         "melee",
         1,
-        UnitStats(4090, 253, 1.5, 0.75, 1.2),
+        UnitStats(4090, 253, 1.5, 0.75, 1.2, sight_range=7.5),
         None,
     ),
     Card(
@@ -469,7 +469,15 @@ DEFAULT_DECK = (
         "air_and_ground",
         "ranged",
         1,
-        UnitStats(721, 217, 1.0, 1.0, 6.0, 1000 / 60),
+        UnitStats(
+            721,
+            217,
+            1.0,
+            1.0,
+            6.0,
+            1000 / 60,
+            sight_range=6.0,
+        ),
         None,
     ),
     Card(
