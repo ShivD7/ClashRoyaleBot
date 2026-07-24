@@ -7,7 +7,7 @@ battle by exact time steps and makes the same engine reusable by an RL agent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
@@ -34,6 +34,9 @@ class UnitStats:
     attack_range: float
     projectile_speed: float = 0.0
     sight_range: float = 5.5
+    body_radius: float = 9.0
+    mass: float = 1.0
+    knockback_resistance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class SpellStats:
     damage: int
     crown_tower_damage: int
     radius: float
+    knockback_distance: float = 0.0
 
 
 class CardLike(Protocol):
@@ -80,12 +84,18 @@ class BattleEntity:
     movement_type: str
     attack_style: str
     radius: float
+    mass: float
+    knockback_resistance: float
     is_building: bool = False
     tower_kind: str | None = None
     active: bool = True
     state: EntityState = EntityState.RETARGETING
     target_id: int | None = None
     attack_cooldown: float = 0.0
+    lane_x: float | None = None
+    velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
+    knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
+    knockback_remaining: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -128,6 +138,11 @@ class BattleEngine:
     PRINCESS_RANGE = 7.5
     KING_RANGE = 7.0
     TOWER_PROJECTILE_SPEED = 1000 / 60
+    COLLISION_ITERATIONS = 4
+    LOCAL_AVOIDANCE_TILES = 0.85
+    BUILDING_AVOIDANCE_TILES = 1.4
+    BRIDGE_HALF_WIDTH_TILES = 1.0
+    BRIDGE_CONGESTION_PENALTY_TILES = 0.35
 
     def __init__(
         self,
@@ -144,6 +159,9 @@ class BattleEngine:
         self.river_top = river_top
         self.river_bottom = river_top + river_height
         self.bridge_x_positions = bridge_x_positions
+        lane_span = abs(bridge_x_positions[1] - bridge_x_positions[0])
+        self.arena_left = min(bridge_x_positions) - lane_span / 2
+        self.arena_right = max(bridge_x_positions) + lane_span / 2
         self.entities: list[BattleEntity] = []
         self.projectiles: list[Projectile] = []
         self._next_entity_id = 1
@@ -263,6 +281,8 @@ class BattleEngine:
             movement_type="ground",
             attack_style="ranged",
             radius=30.0 if is_king else 23.0,
+            mass=float("inf"),
+            knockback_resistance=1.0,
             is_building=True,
             tower_kind=tower_kind,
             # King Towers wake only after one allied Princess Tower is destroyed.
@@ -322,16 +342,6 @@ class BattleEngine:
         if stats is None:
             raise ValueError(f"Troop card {card.name} has no unit statistics")
 
-        radius_by_name = {
-            "Skeletons": 5.0,
-            "Minions": 7.0,
-            "Archers": 7.0,
-            "Musketeer": 9.0,
-            "Knight": 10.0,
-            "Mini P.E.K.K.A": 10.0,
-            "Giant": 15.0,
-            "Cannon": 14.0,
-        }
         suffix = f" {index + 1}" if card.unit_count > 1 else ""
         entity = BattleEntity(
             entity_id=self._new_entity_id(),
@@ -351,7 +361,13 @@ class BattleEngine:
             target_types=card.target_types,
             movement_type=card.movement_type,
             attack_style=card.attack_style,
-            radius=radius_by_name.get(card.name, 9.0),
+            radius=stats.body_radius,
+            mass=float("inf") if card.card_type == "building" else stats.mass,
+            knockback_resistance=(
+                1.0
+                if card.card_type == "building"
+                else stats.knockback_resistance
+            ),
             is_building=card.card_type == "building",
         )
         self.entities.append(entity)
@@ -383,6 +399,12 @@ class BattleEngine:
                 else stats.damage
             )
             target.take_damage(damage)
+            if stats.knockback_distance > 0 and target.is_alive:
+                self.apply_knockback(
+                    target.entity_id,
+                    center,
+                    distance_tiles=stats.knockback_distance,
+                )
 
         self._activate_king_towers()
 
@@ -392,17 +414,33 @@ class BattleEngine:
             return
 
         self._activate_king_towers()
+        movement_displacements: dict[int, pygame.Vector2] = {}
 
-        # Entity IDs and locked target IDs remain stable even if another entity
-        # dies during this loop.
-        for entity in tuple(self.entities):
+        # Decide every entity's action before changing any position. Movement
+        # therefore uses a shared snapshot instead of depending on spawn order.
+        for entity in sorted(self.entities, key=lambda item: item.entity_id):
             if not entity.is_alive or not entity.active:
                 continue
 
+            entity.velocity.update(0, 0)
             entity.attack_cooldown = max(
                 0.0,
                 entity.attack_cooldown - delta_seconds,
             )
+
+            if entity.knockback_remaining > 0 and not entity.is_building:
+                forced_time = min(delta_seconds, entity.knockback_remaining)
+                movement_displacements[entity.entity_id] = (
+                    entity.knockback_velocity * forced_time
+                )
+                entity.velocity = entity.knockback_velocity.copy()
+                entity.knockback_remaining -= forced_time
+                if entity.knockback_remaining <= 0:
+                    entity.knockback_remaining = 0.0
+                    entity.knockback_velocity.update(0, 0)
+                entity.state = EntityState.MOVING
+                continue
+
             target = self.entity_by_id(entity.target_id)
 
             if target is None or not target.is_alive:
@@ -436,9 +474,18 @@ class BattleEngine:
                 entity.state = EntityState.ATTACKING
             else:
                 entity.state = EntityState.MOVING
-                self._move_toward_target(entity, target, delta_seconds)
+                velocity = self._desired_velocity(
+                    entity,
+                    target,
+                    delta_seconds,
+                )
+                entity.velocity = velocity
+                movement_displacements[entity.entity_id] = (
+                    velocity * delta_seconds
+                )
 
         if self.winning_team is None:
+            self._apply_movement(movement_displacements)
             self._update_projectiles(delta_seconds)
         self._activate_king_towers()
 
@@ -546,12 +593,9 @@ class BattleEngine:
         entity: BattleEntity,
         target: BattleEntity,
     ) -> pygame.Vector2:
-        """Route cross-river ground movement through the nearest bridge."""
-        # Flying units travel directly over water instead of detouring through
-        # a bridge. Their logical position still uses the same two-dimensional
-        # arena coordinates as every other entity.
+        """Return the next lane waypoint toward a target."""
         if entity.movement_type == "air":
-            return target.position
+            return target.position.copy()
 
         moving_up = entity.team == "blue"
         entity_below = entity.position.y >= self.river_bottom
@@ -566,42 +610,411 @@ class BattleEngine:
         inside_river = self.river_top <= entity.position.y < self.river_bottom
 
         if not crosses_river and not inside_river:
-            return target.position
+            return target.position.copy()
 
-        bridge_x = min(
-            self.bridge_x_positions,
-            key=lambda x: abs(x - entity.position.x),
-        )
+        if entity.lane_x is None:
+            entity.lane_x = self._select_bridge(entity, target)
+        bridge_x = entity.lane_x
 
         if moving_up:
-            destination_y = (
-                self.river_top - 1
-                if inside_river
-                else self.river_bottom - 1
+            entry = pygame.Vector2(
+                bridge_x,
+                self.river_bottom + entity.radius,
+            )
+            exit_point = pygame.Vector2(
+                bridge_x,
+                self.river_top - entity.radius,
             )
         else:
-            destination_y = (
-                self.river_bottom + 1
-                if inside_river
-                else self.river_top + 1
+            entry = pygame.Vector2(
+                bridge_x,
+                self.river_top - entity.radius,
+            )
+            exit_point = pygame.Vector2(
+                bridge_x,
+                self.river_bottom + entity.radius,
             )
 
-        return pygame.Vector2(bridge_x, destination_y)
+        entry_tolerance = max(1.0, entity.movement_speed / 20)
+        if not inside_river and entity.position.distance_to(entry) > entry_tolerance:
+            return entry
+        return exit_point
 
-    def _move_toward_target(
+    def _select_bridge(
+        self,
+        entity: BattleEntity,
+        target: BattleEntity,
+    ) -> float:
+        """Choose a stable lane using travel distance and current congestion."""
+        moving_up = entity.team == "blue"
+        entry_y = (
+            self.river_bottom + entity.radius
+            if moving_up
+            else self.river_top - entity.radius
+        )
+        exit_y = (
+            self.river_top - entity.radius
+            if moving_up
+            else self.river_bottom + entity.radius
+        )
+        choices = []
+
+        for bridge_x in self.bridge_x_positions:
+            entry = pygame.Vector2(bridge_x, entry_y)
+            exit_point = pygame.Vector2(bridge_x, exit_y)
+            travel_distance = entity.position.distance_to(entry)
+            travel_distance += exit_point.distance_to(target.position)
+            congestion = sum(
+                other.entity_id != entity.entity_id
+                and other.is_alive
+                and not other.is_building
+                and other.movement_type == "ground"
+                and other.lane_x == bridge_x
+                and self.river_top - self.tile_size * 3
+                <= other.position.y
+                <= self.river_bottom + self.tile_size * 3
+                for other in self.entities
+            )
+            cost = travel_distance + (
+                congestion
+                * self.BRIDGE_CONGESTION_PENALTY_TILES
+                * self.tile_size
+            )
+            choices.append((cost, bridge_x))
+
+        return min(choices, key=lambda item: (item[0], item[1]))[1]
+
+    def _desired_velocity(
         self,
         entity: BattleEntity,
         target: BattleEntity,
         delta_seconds: float,
-    ) -> None:
+    ) -> pygame.Vector2:
+        """Blend path following with short-range unit and obstacle avoidance."""
         destination = self._movement_destination(entity, target)
         displacement = destination - entity.position
         distance = displacement.length()
-        if distance == 0:
+        if distance <= 1e-9:
+            return pygame.Vector2()
+
+        maximum_speed = entity.movement_speed
+        speed = min(maximum_speed, distance / delta_seconds)
+        direction = displacement.normalize()
+        velocity = direction * speed
+        velocity += self._avoidance_velocity(entity, target, direction)
+
+        if velocity.length_squared() > maximum_speed * maximum_speed:
+            velocity.scale_to_length(maximum_speed)
+        return velocity
+
+    def _avoidance_velocity(
+        self,
+        entity: BattleEntity,
+        target: BattleEntity,
+        travel_direction: pygame.Vector2,
+    ) -> pygame.Vector2:
+        """Steer around nearby bodies before collision actually occurs."""
+        steering = pygame.Vector2()
+
+        for other in sorted(self.living_entities, key=lambda item: item.entity_id):
+            if other.entity_id in {entity.entity_id, target.entity_id}:
+                continue
+            if not self._shares_collision_layer(entity, other):
+                continue
+
+            offset = other.position - entity.position
+            distance = offset.length()
+            extra_clearance = self.LOCAL_AVOIDANCE_TILES * self.tile_size
+            if other.is_building:
+                extra_clearance = self.BUILDING_AVOIDANCE_TILES * self.tile_size
+            influence_distance = entity.radius + other.radius + extra_clearance
+            if distance >= influence_distance:
+                continue
+
+            if distance <= 1e-9:
+                away = self._stable_pair_normal(entity, other) * -1
+            else:
+                away = -offset / distance
+
+            ahead = offset.dot(travel_direction) > 0
+            influence = 1.0 - distance / influence_distance
+
+            # Overlap correction begins immediately. Approaching units also
+            # receive a deterministic side-step so queues can flow around one
+            # another instead of repeatedly walking straight into a body.
+            body_distance = entity.radius + other.radius
+            if distance < body_distance:
+                steering += away * entity.movement_speed * influence
+            if ahead:
+                lateral = pygame.Vector2(
+                    -travel_direction.y,
+                    travel_direction.x,
+                )
+                cross = travel_direction.cross(offset)
+                if abs(cross) <= 1e-6:
+                    side = -1.0 if entity.entity_id < other.entity_id else 1.0
+                else:
+                    side = -1.0 if cross > 0 else 1.0
+                strength = 0.8 if other.is_building else 0.45
+                steering += (
+                    lateral
+                    * side
+                    * entity.movement_speed
+                    * influence
+                    * strength
+                )
+                steering += away * entity.movement_speed * influence * 0.35
+
+        return steering
+
+    @staticmethod
+    def _shares_collision_layer(
+        first: BattleEntity,
+        second: BattleEntity,
+    ) -> bool:
+        """Return whether two bodies physically collide while moving."""
+        if first.movement_type == "air" or second.movement_type == "air":
+            return (
+                first.movement_type == "air"
+                and second.movement_type == "air"
+            )
+        return True
+
+    @staticmethod
+    def _stable_pair_normal(
+        first: BattleEntity,
+        second: BattleEntity,
+    ) -> pygame.Vector2:
+        """Return a reproducible separation direction for coincident bodies."""
+        lower_id, higher_id = sorted((first.entity_id, second.entity_id))
+        axis = (lower_id * 37 + higher_id * 17) % 4
+        normals = (
+            pygame.Vector2(1, 0),
+            pygame.Vector2(0, 1),
+            pygame.Vector2(-1, 0),
+            pygame.Vector2(0, -1),
+        )
+        normal = normals[axis]
+        return normal if first.entity_id == lower_id else -normal
+
+    def _apply_movement(
+        self,
+        displacements: dict[int, pygame.Vector2],
+    ) -> None:
+        """Apply simultaneous movement and solve any remaining body overlaps."""
+        previous_positions = {
+            entity.entity_id: entity.position.copy()
+            for entity in self.living_entities
+        }
+
+        for entity in sorted(self.living_entities, key=lambda item: item.entity_id):
+            displacement = displacements.get(entity.entity_id)
+            if displacement is None or entity.is_building:
+                continue
+            entity.position += displacement
+            self._constrain_entity(
+                entity,
+                previous_positions[entity.entity_id],
+            )
+
+        for _ in range(self.COLLISION_ITERATIONS):
+            changed = self._resolve_collisions(previous_positions)
+            if not changed:
+                break
+
+    def _resolve_collisions(
+        self,
+        previous_positions: dict[int, pygame.Vector2],
+    ) -> bool:
+        """Separate overlapping circular bodies using mass-weighted correction."""
+        entities = sorted(self.living_entities, key=lambda item: item.entity_id)
+        changed = False
+
+        for index, first in enumerate(entities):
+            for second in entities[index + 1:]:
+                if first.is_building and second.is_building:
+                    continue
+                if not self._shares_collision_layer(first, second):
+                    continue
+
+                offset = second.position - first.position
+                distance = offset.length()
+                required_distance = first.radius + second.radius
+                if distance >= required_distance - 1e-6:
+                    continue
+
+                normal = (
+                    offset / distance
+                    if distance > 1e-9
+                    else self._stable_pair_normal(first, second)
+                )
+                penetration = required_distance - distance
+                first_inverse_mass = (
+                    0.0 if first.is_building else 1.0 / max(first.mass, 0.01)
+                )
+                second_inverse_mass = (
+                    0.0 if second.is_building else 1.0 / max(second.mass, 0.01)
+                )
+                inverse_mass_total = first_inverse_mass + second_inverse_mass
+                if inverse_mass_total <= 0:
+                    continue
+
+                first.position -= (
+                    normal
+                    * penetration
+                    * first_inverse_mass
+                    / inverse_mass_total
+                )
+                second.position += (
+                    normal
+                    * penetration
+                    * second_inverse_mass
+                    / inverse_mass_total
+                )
+                self._constrain_entity(
+                    first,
+                    previous_positions[first.entity_id],
+                )
+                self._constrain_entity(
+                    second,
+                    previous_positions[second.entity_id],
+                )
+                changed = True
+
+        return changed
+
+    def _constrain_entity(
+        self,
+        entity: BattleEntity,
+        previous_position: pygame.Vector2,
+    ) -> None:
+        """Keep bodies inside the arena and ground troops out of open water."""
+        if entity.is_building:
             return
 
-        step = min(distance, entity.movement_speed * delta_seconds)
-        entity.position += displacement.normalize() * step
+        entity.position.x = min(
+            self.arena_right - entity.radius,
+            max(self.arena_left + entity.radius, entity.position.x),
+        )
+        entity.position.y = min(
+            self.screen_height - entity.radius,
+            max(entity.radius, entity.position.y),
+        )
+        if entity.movement_type == "air":
+            return
+
+        entered_from_above = (
+            previous_position.y + entity.radius <= self.river_top
+            and entity.position.y + entity.radius > self.river_top
+        )
+        entered_from_below = (
+            previous_position.y - entity.radius >= self.river_bottom
+            and entity.position.y - entity.radius < self.river_bottom
+        )
+        if (
+            (entered_from_above or entered_from_below)
+            and self._bridge_under_entity(entity) is None
+        ):
+            entity.position.y = (
+                self.river_top - entity.radius
+                if entered_from_above
+                else self.river_bottom + entity.radius
+            )
+            return
+
+        overlaps_river = (
+            entity.position.y + entity.radius > self.river_top
+            and entity.position.y - entity.radius < self.river_bottom
+        )
+        if not overlaps_river:
+            return
+
+        bridge_x = self._bridge_under_entity(entity)
+        if bridge_x is not None:
+            half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+            entity.position.x = min(
+                bridge_x + half_width - entity.radius,
+                max(
+                    bridge_x - half_width + entity.radius,
+                    entity.position.x,
+                ),
+            )
+            return
+
+        previous_inside_river = (
+            self.river_top <= previous_position.y <= self.river_bottom
+        )
+        if previous_inside_river and entity.lane_x is not None:
+            entity.position.x = entity.lane_x
+            return
+
+        if previous_position.y < self.river_top:
+            entity.position.y = self.river_top - entity.radius
+        elif previous_position.y > self.river_bottom:
+            entity.position.y = self.river_bottom + entity.radius
+        elif entity.position.y < (self.river_top + self.river_bottom) / 2:
+            entity.position.y = self.river_top - entity.radius
+        else:
+            entity.position.y = self.river_bottom + entity.radius
+
+    def _bridge_under_entity(self, entity: BattleEntity) -> float | None:
+        """Return a bridge that fully supports this ground unit's body."""
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        candidates = [
+            bridge_x
+            for bridge_x in self.bridge_x_positions
+            if abs(entity.position.x - bridge_x) <= usable_half_width + 1e-6
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda bridge_x: abs(entity.position.x - bridge_x),
+        )
+
+    def apply_knockback(
+        self,
+        entity_id: int,
+        source_position: tuple[float, float] | pygame.Vector2,
+        *,
+        distance_tiles: float,
+        duration: float = 0.25,
+    ) -> bool:
+        """Interrupt and push a movable troop away from a source position."""
+        if duration <= 0:
+            raise ValueError("Knockback duration must be positive")
+        if distance_tiles < 0:
+            raise ValueError("Knockback distance cannot be negative")
+
+        entity = self.entity_by_id(entity_id)
+        if entity is None or not entity.is_alive or entity.is_building:
+            return False
+
+        direction = entity.position - pygame.Vector2(source_position)
+        if direction.length_squared() <= 1e-9:
+            direction = pygame.Vector2(
+                -1 if entity.entity_id % 2 else 1,
+                0,
+            )
+        else:
+            direction = direction.normalize()
+
+        effective_distance = (
+            distance_tiles
+            * self.tile_size
+            * max(0.0, 1.0 - entity.knockback_resistance)
+        )
+        if effective_distance <= 0:
+            return False
+
+        entity.knockback_velocity = (
+            direction * effective_distance / duration
+        )
+        entity.knockback_remaining = duration
+        entity.target_id = None
+        entity.state = EntityState.RETARGETING
+        return True
 
     def _attack_if_ready(
         self,
