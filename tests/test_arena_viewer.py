@@ -21,6 +21,8 @@ from arena_viewer import (
     MATCH_DURATION_SECONDS,
     OVERTIME_DURATION_SECONDS,
     OVERTIME_NOTICE_SECONDS,
+    TIEBREAKER_DAMAGE_PER_SECOND,
+    TIEBREAKER_NOTICE_SECONDS,
     RIGHT_LANE_X,
     ArenaViewer,
     CardCycle,
@@ -468,6 +470,8 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     viewer.match_finished_at_ms = 251_000
     viewer.overtime_active = True
     viewer.overtime_started_at_ms = 181_000
+    viewer.tiebreaker_active = True
+    viewer.tiebreaker_started_at_ms = 301_000
     viewer.selected_tile = (4, 20)
     viewer.selected_card_index = 2
     viewer.dragged_card_index = 2
@@ -475,6 +479,7 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     viewer.elixir_multiplier_notice = 3
     viewer.elixir_multiplier_notice_remaining = 1.0
     viewer.overtime_notice_remaining = 1.0
+    viewer.tiebreaker_notice_remaining = 1.0
 
     viewer.reset_match(now_ms=999_000)
 
@@ -493,6 +498,8 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     assert viewer.match_finished_at_ms is None
     assert not viewer.overtime_active
     assert viewer.overtime_started_at_ms is None
+    assert not viewer.tiebreaker_active
+    assert viewer.tiebreaker_started_at_ms is None
     assert viewer.selected_tile is None
     assert viewer.selected_card_index is None
     assert viewer.dragged_card_index is None
@@ -500,6 +507,7 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     assert viewer.elixir_multiplier_notice is None
     assert viewer.elixir_multiplier_notice_remaining == 0
     assert viewer.overtime_notice_remaining == 0
+    assert viewer.tiebreaker_notice_remaining == 0
 
 
 def test_fireball_can_be_deployed_in_enemy_territory() -> None:
@@ -690,9 +698,13 @@ def make_match_state_viewer(
     viewer.overtime_active = False
     viewer.overtime_started_at_ms = None
     viewer.overtime_notice_remaining = 0.0
+    viewer.tiebreaker_active = False
+    viewer.tiebreaker_started_at_ms = None
+    viewer.tiebreaker_notice_remaining = 0.0
     viewer.battle = SimpleNamespace(
         winning_team=None,
         crown_scores={"red": red_crowns, "blue": blue_crowns},
+        projectiles=[],
     )
     viewer.selected_card_index = None
     viewer.dragged_card_index = None
@@ -766,15 +778,66 @@ def test_overtime_is_sudden_death_when_a_team_takes_crown_lead() -> None:
     assert viewer.match_winner == "blue"
 
 
-def test_tied_overtime_ends_after_exactly_two_minutes() -> None:
+def test_tied_overtime_starts_tiebreaker_after_exactly_two_minutes() -> None:
     viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
     viewer.update_match_state(now_ms=181_000)
 
     viewer.update_match_state(now_ms=301_000)
 
+    assert not viewer.match_finished
+    assert viewer.tiebreaker_active
+    assert viewer.tiebreaker_started_at_ms == 301_000
+    assert viewer.tiebreaker_notice_remaining == TIEBREAKER_NOTICE_SECONDS
+
+
+def test_tiebreaker_waits_for_notice_then_visibly_drains_every_tower() -> None:
+    viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
+    viewer.battle = viewer.create_battle_engine()
+    viewer.update_match_state(now_ms=181_000)
+    viewer.update_match_state(now_ms=301_000)
+    starting_health = {
+        tower.entity_id: tower.health
+        for tower in viewer.battle.living_crown_towers
+    }
+
+    viewer.update_tiebreaker(1.0, current_ms=302_000)
+    assert all(
+        tower.health == starting_health[tower.entity_id]
+        for tower in viewer.battle.living_crown_towers
+    )
+
+    viewer.update_tiebreaker(0.5, current_ms=302_500)
+    viewer.update_tiebreaker(0.1, current_ms=302_600)
+    expected_damage = TIEBREAKER_DAMAGE_PER_SECOND * 0.1
+    assert all(
+        tower.health == starting_health[tower.entity_id] - expected_damage
+        for tower in viewer.battle.living_crown_towers
+    )
+
+
+def test_first_team_to_lose_tower_in_tiebreaker_loses_match() -> None:
+    viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
+    viewer.battle = viewer.create_battle_engine()
+    red_princess = next(
+        tower
+        for tower in viewer.battle.living_crown_towers
+        if tower.team == "red" and tower.tower_kind == "princess"
+    )
+    red_princess.health = 75
+    viewer.update_match_state(now_ms=181_000)
+    viewer.update_match_state(now_ms=301_000)
+    viewer.tiebreaker_notice_remaining = 0
+
+    viewer.update_tiebreaker(0.2, current_ms=301_200)
+
     assert viewer.match_finished
-    assert viewer.match_winner is None
-    assert viewer.match_finished_at_ms == 301_000
+    assert viewer.match_winner == "blue"
+    assert viewer.match_finished_at_ms == 301_200
+    assert red_princess.health == 0
+    assert viewer.match_result_text() == (
+        "BLUE WINS",
+        "RED 0  -  1 BLUE",
+    )
 
 
 def test_match_timer_counts_down_and_stops_at_zero() -> None:

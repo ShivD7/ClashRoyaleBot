@@ -151,6 +151,14 @@ ELIXIR_NOTICE_BORDER_COLOR = (245, 92, 232)
 OVERTIME_NOTICE_SECONDS = 1.5
 OVERTIME_NOTICE_PANEL_COLOR = (8, 9, 12, 235)
 OVERTIME_NOTICE_TEXT_COLOR = (244, 70, 70)
+# Tiebreaker damage begins after a short announcement. Six hundred health per
+# second makes a full Princess Tower drain in roughly five seconds: quick
+# enough to keep the result moving, but slow enough to read every health bar.
+TIEBREAKER_NOTICE_SECONDS = 1.5
+TIEBREAKER_DAMAGE_PER_SECOND = 600.0
+TIEBREAKER_NOTICE_PANEL_COLOR = (10, 10, 13, 235)
+TIEBREAKER_NOTICE_TEXT_COLOR = (255, 84, 76)
+TIEBREAKER_EFFECT_COLOR = (255, 65, 57)
 
 # The temporary card HUD sits immediately above the Elixir bar. Keeping these
 # measurements together makes both drawing and mouse hit-testing use the same
@@ -702,6 +710,9 @@ class ArenaViewer:
         self.overtime_active = False
         self.overtime_started_at_ms: int | None = None
         self.overtime_notice_remaining = 0.0
+        self.tiebreaker_active = False
+        self.tiebreaker_started_at_ms: int | None = None
+        self.tiebreaker_notice_remaining = 0.0
 
     @staticmethod
     def create_battle_engine() -> BattleEngine:
@@ -765,6 +776,8 @@ class ArenaViewer:
         self.match_finished_at_ms = None
         self.overtime_active = False
         self.overtime_started_at_ms = None
+        self.tiebreaker_active = False
+        self.tiebreaker_started_at_ms = None
 
         self.selected_tile = None
         self.selected_card_index = None
@@ -774,6 +787,7 @@ class ArenaViewer:
         self.elixir_multiplier_notice = None
         self.elixir_multiplier_notice_remaining = 0.0
         self.overtime_notice_remaining = 0.0
+        self.tiebreaker_notice_remaining = 0.0
 
     @staticmethod
     def play_again_button_rectangle() -> pygame.Rect:
@@ -1024,7 +1038,10 @@ class ArenaViewer:
 
     def try_play_selected_card(self, tile: tuple[int, int]) -> bool:
         """Deploy the selected card and cycle only when every rule succeeds."""
-        if getattr(self, "match_finished", False):
+        if (
+            getattr(self, "match_finished", False)
+            or getattr(self, "tiebreaker_active", False)
+        ):
             return False
 
         if self.selected_card_index is None:
@@ -1039,7 +1056,10 @@ class ArenaViewer:
 
     def try_play_action(self, team: str, action: PlayCardAction) -> bool:
         """Validate and apply one controller request through shared game rules."""
-        if getattr(self, "match_finished", False):
+        if (
+            getattr(self, "match_finished", False)
+            or getattr(self, "tiebreaker_active", False)
+        ):
             return False
         if not 0 <= action.hand_slot < 4:
             return False
@@ -1078,6 +1098,9 @@ class ArenaViewer:
 
     def legal_actions_for(self, team: str) -> tuple[PlayCardAction, ...]:
         """Enumerate every card/tile action currently legal for one team."""
+        if getattr(self, "tiebreaker_active", False):
+            return ()
+
         player = self.players[team]
         destroyed_lanes = self.destroyed_enemy_princess_lanes(team)
         actions = []
@@ -1139,11 +1162,17 @@ class ArenaViewer:
                 self.try_play_action(team, action)
 
     def update_match_state(self, now_ms: int | None = None) -> None:
-        """Advance regulation/overtime state and finish when a side wins."""
+        """Advance regulation, overtime, and tiebreaker phase transitions."""
         if self.match_finished:
             return
 
         current_ms = self.simulation_now_ms() if now_ms is None else now_ms
+        # Tiebreaker owns terminal resolution while it is draining towers.
+        # In particular, this avoids BattleEngine.winning_team deciding a
+        # simultaneous two-King destruction before both teams are considered.
+        if getattr(self, "tiebreaker_active", False):
+            return
+
         winner = self.battle.winning_team
         if winner is not None:
             self.finish_match(winner, current_ms)
@@ -1170,7 +1199,7 @@ class ArenaViewer:
                 OVERTIME_DURATION_SECONDS,
             ) == 0
             if overtime_expired:
-                self.finish_match(None, current_ms)
+                self.start_tiebreaker(current_ms)
             return
 
         regulation_expired = remaining_match_seconds(
@@ -1193,6 +1222,69 @@ class ArenaViewer:
         )
         self.overtime_notice_remaining = OVERTIME_NOTICE_SECONDS
 
+    def start_tiebreaker(self, current_ms: int) -> None:
+        """Freeze normal play and begin the end-of-overtime tower drain."""
+        self.tiebreaker_active = True
+        self.tiebreaker_started_at_ms = current_ms
+        self.tiebreaker_notice_remaining = TIEBREAKER_NOTICE_SECONDS
+        self.selected_card_index = None
+        self.dragged_card_index = None
+        self.drag_position = None
+        # Combat no longer advances after the clock expires. Remove shots that
+        # were still in flight so they do not hang over the drain animation.
+        projectiles = getattr(self.battle, "projectiles", None)
+        if projectiles is not None:
+            projectiles.clear()
+
+    def update_tiebreaker(
+        self,
+        delta_seconds: float,
+        current_ms: int | None = None,
+    ) -> None:
+        """Drain all standing Crown Towers and resolve the first destruction."""
+        if (
+            delta_seconds <= 0
+            or not self.tiebreaker_active
+            or self.match_finished
+        ):
+            return
+
+        if self.tiebreaker_notice_remaining > 0:
+            self.tiebreaker_notice_remaining = max(
+                0.0,
+                self.tiebreaker_notice_remaining - delta_seconds,
+            )
+            return
+
+        destroyed_teams = self.battle.drain_crown_towers(
+            TIEBREAKER_DAMAGE_PER_SECOND * delta_seconds,
+        )
+        if not destroyed_teams:
+            return
+
+        resolution_ms = (
+            self.simulation_now_ms()
+            if current_ms is None
+            else current_ms
+        )
+        if len(destroyed_teams) == 1:
+            losing_team = next(iter(destroyed_teams))
+            winner = "blue" if losing_team == "red" else "red"
+            self.finish_match(winner, resolution_ms)
+            return
+
+        # Equal-health towers can fall on the same tick. Continue through the
+        # remaining towers rather than arbitrarily favoring one team.
+        standing_teams = {
+            tower.team for tower in self.battle.living_crown_towers
+        }
+        if len(standing_teams) == 1:
+            self.finish_match(next(iter(standing_teams)), resolution_ms)
+        elif not standing_teams:
+            # A perfectly mirrored battle has no fair gameplay signal with
+            # which to select a winner; this is the only remaining draw case.
+            self.finish_match(None, resolution_ms)
+
     def simulation_now_ms(self) -> int:
         """Return the match time reached by completed simulation steps."""
         return self.match_started_at + round(self.match_elapsed * 1000)
@@ -1201,6 +1293,18 @@ class ArenaViewer:
         """Advance every gameplay system by one fixed 50-millisecond step."""
         self.update_match_state()
         if self.match_finished:
+            return
+
+        if getattr(self, "tiebreaker_active", False):
+            next_step_ms = self.simulation_now_ms() + FIXED_TIMESTEP_MS
+            self.update_tiebreaker(
+                FIXED_TIMESTEP_SECONDS,
+                current_ms=next_step_ms,
+            )
+            self.match_elapsed = round(
+                self.match_elapsed + FIXED_TIMESTEP_SECONDS,
+                10,
+            )
             return
 
         if hasattr(self, "players"):
@@ -1239,6 +1343,7 @@ class ArenaViewer:
         self.elixir_multiplier_notice = None
         self.elixir_multiplier_notice_remaining = 0.0
         self.overtime_notice_remaining = 0.0
+        self.tiebreaker_notice_remaining = 0.0
 
     def update_overtime_notice(self, delta_seconds: float) -> None:
         """Count down the temporary regulation-to-overtime announcement."""
@@ -2012,7 +2117,10 @@ class ArenaViewer:
             if self.match_finished_at_ms is not None
             else self.simulation_now_ms()
         )
-        if self.overtime_active:
+        if getattr(self, "tiebreaker_active", False):
+            seconds_left = 0
+            timer_label = "Tiebreaker"
+        elif self.overtime_active:
             if self.overtime_started_at_ms is None:
                 raise RuntimeError("Overtime is active without a start time")
             seconds_left = remaining_match_seconds(
@@ -2688,6 +2796,83 @@ class ArenaViewer:
             panel.get_rect(center=(SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)),
         )
 
+    def draw_tiebreaker_tower_effects(self) -> None:
+        """Pulse a warning ring around every tower losing tiebreaker health."""
+        if (
+            not self.tiebreaker_active
+            or self.match_finished
+            or self.tiebreaker_notice_remaining > 0
+        ):
+            return
+
+        pulse = (math.sin(self.match_elapsed * math.tau * 2) + 1) / 2
+        alpha = round(90 + pulse * 100)
+        effect = pygame.Surface(
+            (SCREEN_WIDTH, ARENA_HEIGHT),
+            pygame.SRCALPHA,
+        )
+        for tower in self.battle.living_crown_towers:
+            center = (round(tower.position.x), round(tower.position.y))
+            pygame.draw.circle(
+                effect,
+                (*TIEBREAKER_EFFECT_COLOR, alpha),
+                center,
+                round(tower.radius) + 10,
+                3,
+            )
+        self.screen.blit(effect, (0, 0))
+
+    def draw_tiebreaker_notice(self) -> None:
+        """Announce the tower-health drain before its first damage tick."""
+        if self.tiebreaker_notice_remaining <= 0:
+            return
+
+        fade_seconds = 0.4
+        alpha_fraction = min(
+            1.0,
+            self.tiebreaker_notice_remaining / fade_seconds,
+        )
+        panel_alpha = round(255 * alpha_fraction)
+        title = self.elixir_multiplier_font.render(
+            "TIEBREAKER!",
+            True,
+            TIEBREAKER_NOTICE_TEXT_COLOR,
+        )
+        subtitle = self.font.render(
+            "CROWN TOWERS LOSING HEALTH",
+            True,
+            TEXT_COLOR,
+        )
+        title.set_alpha(panel_alpha)
+        subtitle.set_alpha(panel_alpha)
+
+        panel = pygame.Surface((360, 92), pygame.SRCALPHA)
+        pygame.draw.rect(
+            panel,
+            (
+                *TIEBREAKER_NOTICE_PANEL_COLOR[:3],
+                min(TIEBREAKER_NOTICE_PANEL_COLOR[3], panel_alpha),
+            ),
+            panel.get_rect(),
+            border_radius=10,
+        )
+        pygame.draw.rect(
+            panel,
+            (*TIEBREAKER_NOTICE_TEXT_COLOR, panel_alpha),
+            panel.get_rect(),
+            3,
+            border_radius=10,
+        )
+        panel.blit(title, title.get_rect(center=(panel.get_width() // 2, 33)))
+        panel.blit(
+            subtitle,
+            subtitle.get_rect(center=(panel.get_width() // 2, 68)),
+        )
+        self.screen.blit(
+            panel,
+            panel.get_rect(center=(SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)),
+        )
+
     # ------------------------------------------------------------------
     # Draw frames and run the game
     # ------------------------------------------------------------------
@@ -2700,6 +2885,7 @@ class ArenaViewer:
         self.draw_arena()
         self.draw_restricted_placement_tiles()
         self.draw_towers()
+        self.draw_tiebreaker_tower_effects()
         self.draw_deployed_buildings()
         self.draw_units()
         self.draw_projectiles()
@@ -2710,6 +2896,7 @@ class ArenaViewer:
         self.draw_match_timer()
         self.draw_crown_scores()
         self.draw_overtime_notice()
+        self.draw_tiebreaker_notice()
         # The temporary announcement belongs above arena action but below the
         # draggable card, which should always remain attached to the pointer.
         self.draw_elixir_multiplier_notice()

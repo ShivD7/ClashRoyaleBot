@@ -405,6 +405,45 @@ def test_destroying_king_tower_completes_score_at_three_crowns() -> None:
     assert engine.crowns_for("blue") == 3
 
 
+def test_tiebreaker_drain_damages_all_living_crown_towers_equally() -> None:
+    engine = make_engine()
+    towers = engine.living_crown_towers
+    starting_health = {
+        tower.entity_id: tower.health
+        for tower in towers
+    }
+
+    destroyed_teams = engine.drain_crown_towers(40)
+
+    assert destroyed_teams == frozenset()
+    assert all(
+        tower.health == starting_health[tower.entity_id] - 40
+        for tower in towers
+    )
+
+
+def test_tiebreaker_drain_stops_exactly_at_first_tower_destruction() -> None:
+    engine = make_engine()
+    red_princess = next(
+        tower
+        for tower in engine.living_crown_towers
+        if tower.team == "red" and tower.tower_kind == "princess"
+    )
+    blue_princess = next(
+        tower
+        for tower in engine.living_crown_towers
+        if tower.team == "blue" and tower.tower_kind == "princess"
+    )
+    red_princess.health = 25
+    blue_starting_health = blue_princess.health
+
+    destroyed_teams = engine.drain_crown_towers(100)
+
+    assert destroyed_teams == frozenset({"red"})
+    assert red_princess.health == 0
+    assert blue_princess.health == blue_starting_health - 25
+
+
 def test_fireball_uses_reduced_damage_against_crown_towers() -> None:
     engine = make_engine()
     red_princess = next(

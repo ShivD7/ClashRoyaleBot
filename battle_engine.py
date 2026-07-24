@@ -158,6 +158,15 @@ class BattleEngine:
         return tuple(entity for entity in self.entities if entity.is_alive)
 
     @property
+    def living_crown_towers(self) -> tuple[BattleEntity, ...]:
+        """Return surviving Princess and King Towers for match rules."""
+        return tuple(
+            entity
+            for entity in self.entities
+            if entity.is_alive and entity.tower_kind is not None
+        )
+
+    @property
     def winning_team(self) -> str | None:
         """Return the winner after a King Tower dies, otherwise ``None``."""
         destroyed_king = next(
@@ -385,6 +394,32 @@ class BattleEngine:
             target.take_damage(damage)
 
         self._activate_king_towers()
+
+    def drain_crown_towers(self, requested_damage: float) -> frozenset[str]:
+        """Damage every standing Crown Tower equally for a tiebreaker tick.
+
+        Damage is capped at the lowest remaining tower health. This prevents a
+        large simulation step from skipping over the true first destruction.
+        The returned teams are exactly those that lost a tower on this tick.
+        """
+        if requested_damage <= 0:
+            return frozenset()
+
+        towers = self.living_crown_towers
+        if not towers:
+            return frozenset()
+
+        damage = min(requested_damage, min(tower.health for tower in towers))
+        destroyed_teams = {
+            tower.team
+            for tower in towers
+            if tower.health <= damage
+        }
+        for tower in towers:
+            tower.take_damage(damage)
+
+        self._activate_king_towers()
+        return frozenset(destroyed_teams)
 
     def update(self, delta_seconds: float) -> None:
         """Advance a deterministic slice of battle time."""
