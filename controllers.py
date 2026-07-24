@@ -29,6 +29,10 @@ class ControllerCard:
     elixir_cost: int
     role: str
     card_type: str
+    target_priority: str
+    target_types: str
+    movement_type: str
+    attack_style: str
 
 
 @dataclass(frozen=True)
@@ -113,7 +117,9 @@ class ScriptedController(PlayerController):
         priority = {
             "win_condition": 0,
             "ranged_support": 1,
+            "flying_swarm": 2,
             "tank_killer": 2,
+            "defensive_building": 3,
             "mini_tank": 3,
             "cycle_swarm": 4,
             "big_spell": 5,

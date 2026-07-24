@@ -156,6 +156,10 @@ def test_rl_controller_uses_injected_policy_without_mutating_match() -> None:
                 card.elixir_cost,
                 card.role,
                 card.card_type,
+                card.target_priority,
+                card.target_types,
+                card.movement_type,
+                card.attack_style,
             )
             for card in DEFAULT_DECK[:4]
         ),

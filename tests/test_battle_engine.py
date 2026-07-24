@@ -2,6 +2,7 @@ import pytest
 
 from arena_viewer import (
     ARENA_HEIGHT,
+    CARD_CATALOG,
     DEFAULT_DECK,
     LEFT_LANE_X,
     RIGHT_LANE_X,
@@ -29,7 +30,7 @@ def make_engine() -> BattleEngine:
 
 
 def card_named(name: str):
-    return next(card for card in DEFAULT_DECK if card.name == name)
+    return next(card for card in CARD_CATALOG if card.name == name)
 
 
 def test_giant_ignores_troops_and_locks_nearest_enemy_building() -> None:
@@ -52,6 +53,97 @@ def test_giant_ignores_troops_and_locks_nearest_enemy_building() -> None:
     assert target.is_building
     assert target.team == "red"
     assert target.tower_kind == "princess"
+
+
+def test_ground_only_troop_cannot_target_flying_minions() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    minions = engine.deploy_card(
+        card_named("Minions"),
+        "red",
+        (LEFT_LANE_X, 530),
+    )
+
+    engine.update(0.01)
+    target = engine.entity_by_id(knight.target_id)
+
+    assert target is not None
+    assert target not in minions
+    assert target.tower_kind == "princess"
+
+
+def test_air_capable_archers_can_target_flying_minions() -> None:
+    engine = make_engine()
+    archer = engine.deploy_card(
+        card_named("Archers"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    minions = engine.deploy_card(
+        card_named("Minions"),
+        "red",
+        (LEFT_LANE_X, 530),
+    )
+
+    engine.update(0.01)
+
+    assert engine.entity_by_id(archer.target_id) in minions
+
+
+def test_cannon_is_stationary_and_targets_ground_but_not_air() -> None:
+    engine = make_engine()
+    cannon = engine.deploy_card(
+        card_named("Cannon"),
+        "blue",
+        (LEFT_LANE_X, 520),
+    )[0]
+    engine.deploy_card(
+        card_named("Minions"),
+        "red",
+        (LEFT_LANE_X, 500),
+    )
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 480),
+    )[0]
+    starting_position = cannon.position.copy()
+
+    engine.update(0.01)
+
+    assert cannon.is_building
+    assert cannon.tower_kind is None
+    assert cannon.position == starting_position
+    assert cannon.target_id == knight.entity_id
+
+
+def test_flying_units_cross_the_river_without_using_a_bridge() -> None:
+    engine = make_engine()
+    minion = engine.deploy_card(
+        card_named("Minions"),
+        "blue",
+        (300, 550),
+    )[0]
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "blue",
+        (300, 550),
+    )[0]
+    red_king = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "king"
+    )
+
+    assert engine._movement_destination(minion, red_king) == red_king.position
+    assert (
+        engine._movement_destination(giant, red_king).x
+        in engine.bridge_x_positions
+    )
 
 
 def test_moving_unit_switches_to_closer_enemy_inside_sight_range() -> None:
@@ -343,4 +435,7 @@ def test_every_default_card_has_complete_combat_stats() -> None:
             assert card.unit_stats.max_health > 0
             assert card.unit_stats.damage > 0
             assert card.unit_stats.hit_speed > 0
-            assert card.unit_stats.movement_speed > 0
+            if card.card_type == "building":
+                assert card.unit_stats.movement_speed == 0
+            else:
+                assert card.unit_stats.movement_speed > 0

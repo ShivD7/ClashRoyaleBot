@@ -7,6 +7,7 @@ from arena_viewer import (
     ARENA_LEFT,
     ARENA_RIGHT,
     ARENA_WIDTH,
+    CARD_CATALOG,
     DEFAULT_DECK,
     DOUBLE_ELIXIR_START,
     ELIXIR_MULTIPLIER_NOTICE_SECONDS,
@@ -175,66 +176,82 @@ def test_default_deck_has_explicit_behavior_categories() -> None:
     cards = {card.name: card for card in DEFAULT_DECK}
     expected_behaviors = {
         "Knight": (
+            "troop",
             "mini_tank",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
+            "ground",
             "ground",
             "melee",
             1,
         ),
         "Archers": (
+            "troop",
             "ranged_support",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
             "air_and_ground",
+            "ground",
             "ranged",
             2,
         ),
         "Giant": (
+            "troop",
             "win_condition",
             PlacementRule.FRIENDLY_TERRITORY,
             "buildings_only",
+            "ground",
             "ground",
             "melee",
             1,
         ),
         "Fireball": (
+            "spell",
             "big_spell",
             PlacementRule.ANYWHERE,
             "targeted_area",
             "air_and_ground",
+            "none",
             "area",
             0,
         ),
-        "Mini P.E.K.K.A": (
-            "tank_killer",
+        "Cannon": (
+            "building",
+            "defensive_building",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
             "ground",
-            "melee",
-            1,
-        ),
-        "Musketeer": (
-            "ranged_support",
-            PlacementRule.FRIENDLY_TERRITORY,
-            "nearest_enemy",
-            "air_and_ground",
+            "ground",
             "ranged",
             1,
         ),
+        "Minions": (
+            "troop",
+            "flying_swarm",
+            PlacementRule.FRIENDLY_TERRITORY,
+            "nearest_enemy",
+            "air_and_ground",
+            "air",
+            "melee",
+            3,
+        ),
         "Skeletons": (
+            "troop",
             "cycle_swarm",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
+            "ground",
             "ground",
             "melee",
             3,
         ),
         "Zap": (
+            "spell",
             "small_spell",
             PlacementRule.ANYWHERE,
             "targeted_area",
             "air_and_ground",
+            "none",
             "area",
             0,
         ),
@@ -243,14 +260,33 @@ def test_default_deck_has_explicit_behavior_categories() -> None:
     for card_name, expected in expected_behaviors.items():
         card = cards[card_name]
         actual = (
+            card.card_type,
             card.role,
             card.placement_rule,
             card.target_priority,
             card.target_types,
+            card.movement_type,
             card.attack_style,
             card.unit_count,
         )
         assert actual == expected
+
+
+def test_catalog_and_default_deck_cover_core_gameplay_types() -> None:
+    """Training starts with all formal card and movement categories available."""
+    assert {card.card_type for card in DEFAULT_DECK} == {
+        "troop",
+        "spell",
+        "building",
+    }
+    assert {
+        card.movement_type
+        for card in DEFAULT_DECK
+        if card.card_type == "troop"
+    } == {"ground", "air"}
+    assert {"Mini P.E.K.K.A", "Musketeer"} <= {
+        card.name for card in CARD_CATALOG
+    }
 
 
 def test_fireball_and_zap_have_current_damage_radii() -> None:

@@ -52,6 +52,7 @@ class CardLike(Protocol):
     card_type: str
     target_priority: str
     target_types: str
+    movement_type: str
     attack_style: str
     unit_count: int
     unit_stats: UnitStats | None
@@ -60,7 +61,7 @@ class CardLike(Protocol):
 
 @dataclass
 class BattleEntity:
-    """A troop or Crown Tower participating in combat."""
+    """A troop, deployable building, or Crown Tower participating in combat."""
 
     entity_id: int
     name: str
@@ -76,6 +77,7 @@ class BattleEntity:
     projectile_speed: float
     target_priority: str
     target_types: str
+    movement_type: str
     attack_style: str
     radius: float
     is_building: bool = False
@@ -258,6 +260,7 @@ class BattleEngine:
             projectile_speed=self.TOWER_PROJECTILE_SPEED,
             target_priority="nearest_enemy",
             target_types="air_and_ground",
+            movement_type="ground",
             attack_style="ranged",
             radius=30.0 if is_king else 23.0,
             is_building=True,
@@ -285,7 +288,10 @@ class BattleEngine:
             return ()
 
         if card.unit_stats is None:
-            raise ValueError(f"Troop card {card.name} has no unit statistics")
+            raise ValueError(
+                f"{card.card_type.title()} card {card.name} "
+                "has no unit statistics",
+            )
 
         spawned = []
         spacing = min(12.0, self.tile_size * 0.4)
@@ -311,18 +317,20 @@ class BattleEngine:
         position: tuple[float, float],
         index: int,
     ) -> BattleEntity:
-        """Create one runtime entity from immutable card statistics."""
+        """Create one runtime troop or building from immutable card statistics."""
         stats = card.unit_stats
         if stats is None:
             raise ValueError(f"Troop card {card.name} has no unit statistics")
 
         radius_by_name = {
             "Skeletons": 5.0,
+            "Minions": 7.0,
             "Archers": 7.0,
             "Musketeer": 9.0,
             "Knight": 10.0,
             "Mini P.E.K.K.A": 10.0,
             "Giant": 15.0,
+            "Cannon": 14.0,
         }
         suffix = f" {index + 1}" if card.unit_count > 1 else ""
         entity = BattleEntity(
@@ -341,8 +349,10 @@ class BattleEngine:
             projectile_speed=stats.projectile_speed,
             target_priority=card.target_priority,
             target_types=card.target_types,
+            movement_type=card.movement_type,
             attack_style=card.attack_style,
             radius=radius_by_name.get(card.name, 9.0),
+            is_building=card.card_type == "building",
         )
         self.entities.append(entity)
         return entity
@@ -490,10 +500,7 @@ class BattleEngine:
         # Crown Towers defend only against troops, not other buildings.
         if entity.is_building and candidate.is_building:
             return False
-        if (
-            entity.target_types == "ground"
-            and candidate.target_types == "air"
-        ):
+        if entity.target_types == "ground" and candidate.movement_type == "air":
             return False
         return True
 
@@ -540,6 +547,12 @@ class BattleEngine:
         target: BattleEntity,
     ) -> pygame.Vector2:
         """Route cross-river ground movement through the nearest bridge."""
+        # Flying units travel directly over water instead of detouring through
+        # a bridge. Their logical position still uses the same two-dimensional
+        # arena coordinates as every other entity.
+        if entity.movement_type == "air":
+            return target.position
+
         moving_up = entity.team == "blue"
         entity_below = entity.position.y >= self.river_bottom
         target_above = target.position.y < self.river_top

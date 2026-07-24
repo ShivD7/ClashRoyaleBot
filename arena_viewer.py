@@ -223,6 +223,7 @@ class Card:
     placement_rule: PlacementRule
     target_priority: str
     target_types: str
+    movement_type: str
     attack_style: str
     unit_count: int
     unit_stats: UnitStats | None
@@ -391,9 +392,10 @@ class FixedTimestepClock:
         self.waiting_ms = 0
 
 
-# These are data-only placeholder cards. Adding sprites or unit behavior later
-# will not require changing CardCycle because it only cares about card order.
-DEFAULT_DECK = (
+# The catalog can grow beyond eight cards while an individual battle deck
+# remains exactly eight cards. This makes future deck-building possible without
+# coupling the complete card collection to CardCycle.
+CARD_CATALOG = (
     Card(
         "Knight",
         3,
@@ -401,6 +403,7 @@ DEFAULT_DECK = (
         "mini_tank",
         PlacementRule.FRIENDLY_TERRITORY,
         "nearest_enemy",
+        "ground",
         "ground",
         "melee",
         1,
@@ -415,6 +418,7 @@ DEFAULT_DECK = (
         PlacementRule.FRIENDLY_TERRITORY,
         "nearest_enemy",
         "air_and_ground",
+        "ground",
         "ranged",
         2,
         UnitStats(304, 112, 0.9, 1.0, 5.0, 10.0),
@@ -427,6 +431,7 @@ DEFAULT_DECK = (
         "win_condition",
         PlacementRule.FRIENDLY_TERRITORY,
         "buildings_only",
+        "ground",
         "ground",
         "melee",
         1,
@@ -441,6 +446,7 @@ DEFAULT_DECK = (
         PlacementRule.ANYWHERE,
         "targeted_area",
         "air_and_ground",
+        "none",
         "area",
         0,
         None,
@@ -453,6 +459,7 @@ DEFAULT_DECK = (
         "tank_killer",
         PlacementRule.FRIENDLY_TERRITORY,
         "nearest_enemy",
+        "ground",
         "ground",
         "melee",
         1,
@@ -467,6 +474,7 @@ DEFAULT_DECK = (
         PlacementRule.FRIENDLY_TERRITORY,
         "nearest_enemy",
         "air_and_ground",
+        "ground",
         "ranged",
         1,
         UnitStats(
@@ -488,6 +496,7 @@ DEFAULT_DECK = (
         PlacementRule.FRIENDLY_TERRITORY,
         "nearest_enemy",
         "ground",
+        "ground",
         "melee",
         3,
         UnitStats(81, 81, 1.1, 1.5, 0.5),
@@ -501,11 +510,57 @@ DEFAULT_DECK = (
         PlacementRule.ANYWHERE,
         "targeted_area",
         "air_and_ground",
+        "none",
         "area",
         0,
         None,
         SpellStats(192, 58, 2.5),
     ),
+    Card(
+        "Minions",
+        3,
+        "troop",
+        "flying_swarm",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "air_and_ground",
+        "air",
+        "melee",
+        3,
+        UnitStats(230, 117, 1.0, 1.5, 1.6),
+        None,
+    ),
+    Card(
+        "Cannon",
+        3,
+        "building",
+        "defensive_building",
+        PlacementRule.FRIENDLY_TERRITORY,
+        "nearest_enemy",
+        "ground",
+        "ground",
+        "ranged",
+        1,
+        UnitStats(824, 175, 0.9, 0.0, 5.5, 1000 / 60),
+        None,
+    ),
+)
+
+# The playable starter deck represents every formal Clash Royale card type
+# (troop, spell, and building) plus both ground and air movement.
+_DEFAULT_DECK_NAMES = (
+    "Knight",
+    "Archers",
+    "Giant",
+    "Fireball",
+    "Cannon",
+    "Minions",
+    "Skeletons",
+    "Zap",
+)
+DEFAULT_DECK = tuple(
+    next(card for card in CARD_CATALOG if card.name == name)
+    for name in _DEFAULT_DECK_NAMES
 )
 
 
@@ -1056,6 +1111,10 @@ class ArenaViewer:
                     elixir_cost=card.elixir_cost,
                     role=card.role,
                     card_type=card.card_type,
+                    target_priority=card.target_priority,
+                    target_types=card.target_types,
+                    movement_type=card.movement_type,
+                    attack_style=card.attack_style,
                 )
                 for card in player.card_cycle.hand
             ),
@@ -1779,6 +1838,7 @@ class ArenaViewer:
             "Mini P.E.K.K.A": (83, 93, 119),
             "Musketeer": (135, 101, 188),
             "Skeletons": (226, 224, 211),
+            "Minions": (111, 105, 202),
         }
 
         for entity in self.battle.entities:
@@ -1792,6 +1852,18 @@ class ArenaViewer:
             team_outline = (
                 BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
             )
+
+            if entity.movement_type == "air":
+                # Small wings and a shadow make airborne units readable without
+                # changing their actual combat coordinates.
+                shadow = pygame.Rect(0, 0, 18, 7)
+                shadow.center = (center[0], center[1] + 10)
+                pygame.draw.ellipse(self.screen, (55, 65, 55), shadow)
+                wing_color = (184, 181, 235)
+                left_wing = pygame.Rect(center[0] - 13, center[1] - 5, 9, 10)
+                right_wing = pygame.Rect(center[0] + 4, center[1] - 5, 9, 10)
+                pygame.draw.ellipse(self.screen, wing_color, left_wing)
+                pygame.draw.ellipse(self.screen, wing_color, right_wing)
 
             pygame.draw.circle(
                 self.screen,
@@ -1813,6 +1885,48 @@ class ArenaViewer:
             label = self.card_font.render(initials, True, TOWER_OPENING_COLOR)
             self.screen.blit(label, label.get_rect(center=center))
             self.draw_health_bar(entity)
+
+    def draw_deployed_buildings(self) -> None:
+        """Draw player-deployed buildings separately from permanent towers."""
+        for entity in self.battle.entities:
+            if (
+                not entity.is_building
+                or entity.tower_kind is not None
+                or not entity.is_alive
+            ):
+                continue
+
+            center = (round(entity.position.x), round(entity.position.y))
+            team_color = (
+                BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
+            )
+            foundation = pygame.Rect(0, 0, 30, 26)
+            foundation.center = center
+            pygame.draw.rect(
+                self.screen,
+                team_color,
+                foundation.inflate(6, 6),
+                border_radius=6,
+            )
+            pygame.draw.rect(
+                self.screen,
+                (105, 105, 112),
+                foundation,
+                border_radius=5,
+            )
+
+            # The Cannon's barrel points toward the opposing side.
+            direction = -1 if entity.team == "blue" else 1
+            barrel = pygame.Rect(0, 0, 7, 20)
+            barrel.center = (center[0], center[1] + direction * 8)
+            pygame.draw.rect(
+                self.screen,
+                (48, 51, 58),
+                barrel,
+                border_radius=3,
+            )
+            pygame.draw.circle(self.screen, (69, 72, 80), center, 8)
+            self.draw_health_bar(entity, width=36)
 
     def draw_projectiles(self) -> None:
         """Draw arrows and ranged shots as small moving rectangles."""
@@ -2586,6 +2700,7 @@ class ArenaViewer:
         self.draw_arena()
         self.draw_restricted_placement_tiles()
         self.draw_towers()
+        self.draw_deployed_buildings()
         self.draw_units()
         self.draw_projectiles()
         self.draw_tile_highlights()
