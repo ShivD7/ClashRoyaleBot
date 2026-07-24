@@ -11,6 +11,8 @@ from arena_viewer import (
     DOUBLE_ELIXIR_START,
     ELIXIR_MULTIPLIER_NOTICE_SECONDS,
     ENEMY_DEPLOYMENT_UNLOCK_TOP,
+    FIXED_TIMESTEP_MS,
+    FIXED_TIMESTEP_SECONDS,
     GRID_COLUMNS,
     GRID_ROWS,
     HUD_HEIGHT,
@@ -22,6 +24,7 @@ from arena_viewer import (
     ArenaViewer,
     CardCycle,
     ElixirMeter,
+    FixedTimestepClock,
     PlacementRule,
     RIVER_TOP,
     RIVER_HEIGHT,
@@ -606,6 +609,37 @@ def test_match_duration_is_three_minutes() -> None:
     assert MATCH_DURATION_SECONDS == 180
 
 
+def test_fixed_timestep_runs_twenty_simulation_updates_per_second() -> None:
+    assert FIXED_TIMESTEP_MS == 50
+    assert FIXED_TIMESTEP_SECONDS == 0.05
+    assert 1 / FIXED_TIMESTEP_SECONDS == 20
+
+
+def test_fixed_timestep_saves_small_frame_times_for_later() -> None:
+    timestep = FixedTimestepClock()
+
+    assert timestep.add_frame_time(16) == 0
+    assert timestep.add_frame_time(17) == 0
+    assert timestep.waiting_ms == 33
+
+    assert timestep.add_frame_time(17) == 1
+    assert timestep.waiting_ms == 0
+
+
+def test_fixed_timestep_catches_up_after_a_slow_frame() -> None:
+    timestep = FixedTimestepClock(waiting_ms=10)
+
+    assert timestep.add_frame_time(190) == 4
+    assert timestep.waiting_ms == 0
+
+
+def test_fixed_timestep_rejects_negative_frame_time() -> None:
+    timestep = FixedTimestepClock()
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        timestep.add_frame_time(-1)
+
+
 def make_match_state_viewer(
     *,
     red_crowns: int,
@@ -630,6 +664,20 @@ def make_match_state_viewer(
     viewer.elixir_multiplier_notice = None
     viewer.elixir_multiplier_notice_remaining = 0.0
     return viewer
+
+
+def test_simulation_update_uses_exact_fixed_step() -> None:
+    viewer = make_match_state_viewer(red_crowns=0, blue_crowns=0)
+    battle_steps: list[float] = []
+    viewer.battle.update = battle_steps.append
+    viewer.elixir = ElixirMeter()
+    viewer.match_elapsed = 0.0
+
+    viewer.update_simulation()
+
+    assert battle_steps == [FIXED_TIMESTEP_SECONDS]
+    assert viewer.match_elapsed == FIXED_TIMESTEP_SECONDS
+    assert viewer.simulation_now_ms() == 1_000 + FIXED_TIMESTEP_MS
 
 
 def test_tied_regulation_score_starts_two_minute_overtime() -> None:

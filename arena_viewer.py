@@ -8,7 +8,8 @@ This file is split into five main parts:
 4. The ``ArenaViewer`` class, which handles input, updates, and drawing.
 5. The ``main`` function, which starts the game.
 
-For each frame, the game checks input, updates its data, and redraws the screen.
+For each screen frame, the game checks input, runs any ready 50-millisecond
+game updates, and redraws the screen.
 """
 
 from __future__ import annotations
@@ -58,6 +59,10 @@ ENEMY_DEPLOYMENT_UNLOCK_TOP = math.ceil(
     (RIVER_TOP / 2) / TILE_SIZE,
 ) * TILE_SIZE + TILE_SIZE
 FPS = 60
+# Draw up to 60 frames per second, but always update the battle in exact
+# 50-millisecond steps. This gives the simulator 20 updates per second.
+FIXED_TIMESTEP_MS = 50
+FIXED_TIMESTEP_SECONDS = FIXED_TIMESTEP_MS / 1000
 MATCH_DURATION_SECONDS = 3 * 60
 OVERTIME_DURATION_SECONDS = 2 * 60
 
@@ -285,10 +290,10 @@ class ElixirMeter:
         return 1
 
     def update(self, delta_seconds: float, match_elapsed: float) -> None:
-        """Add the Elixir earned during one frame.
+        """Add the Elixir earned during one game update.
 
-        A frame may cross from normal speed into Double Elixir. If that happens,
-        the code splits the frame so each part uses the correct speed.
+        An update may cross from normal speed into Double Elixir. If that
+        happens, the code splits the update so each part uses the correct speed.
         """
         if delta_seconds <= 0:
             return
@@ -304,7 +309,7 @@ class ElixirMeter:
         cursor = match_elapsed
         generated = 0.0
 
-        # Most frames use this loop once. A frame that crosses a speed change
+        # Most updates use this loop once. An update that crosses a speed change
         # uses it more than once.
         while remaining > 0:
             if cursor < DOUBLE_ELIXIR_START:
@@ -337,6 +342,34 @@ class ElixirMeter:
         self.amount -= cost
         self.full_notice_remaining = 0.0
         return True
+
+
+@dataclass
+class FixedTimestepClock:
+    """Turn changing frame times into equal simulation steps.
+
+    Drawing may take a different amount of time on each frame. This clock saves
+    that time until there is enough for one or more 50-millisecond game updates.
+    Any smaller amount is kept for the next frame.
+    """
+
+    waiting_ms: int = 0
+
+    def add_frame_time(self, frame_ms: int) -> int:
+        """Add one frame's time and return how many game updates should run."""
+        if frame_ms < 0:
+            raise ValueError("Frame time cannot be negative")
+
+        self.waiting_ms += frame_ms
+        step_count, self.waiting_ms = divmod(
+            self.waiting_ms,
+            FIXED_TIMESTEP_MS,
+        )
+        return step_count
+
+    def reset(self) -> None:
+        """Remove time left over from the previous match."""
+        self.waiting_ms = 0
 
 
 # These are data-only placeholder cards. Adding sprites or unit behavior later
@@ -550,6 +583,7 @@ class ArenaViewer:
         # entities themselves live in BattleEngine.
         self.deployments: list[Deployment] = []
         self.battle = self.create_battle_engine()
+        self.fixed_timestep = FixedTimestepClock()
         self.match_elapsed = 0.0
         self.match_finished = False
         self.match_winner: str | None = None
@@ -577,6 +611,7 @@ class ArenaViewer:
         """Reset every mutable episode value for a completely fresh rematch."""
         self.battle = self.create_battle_engine()
         self.elixir = ElixirMeter()
+        self.fixed_timestep = FixedTimestepClock()
         self.card_cycle = CardCycle(DEFAULT_DECK)
         self.deployments = []
 
@@ -868,7 +903,7 @@ class ArenaViewer:
         if self.match_finished:
             return
 
-        current_ms = pygame.time.get_ticks() if now_ms is None else now_ms
+        current_ms = self.simulation_now_ms() if now_ms is None else now_ms
         winner = self.battle.winning_team
         if winner is not None:
             self.finish_match(winner, current_ms)
@@ -918,6 +953,27 @@ class ArenaViewer:
         )
         self.overtime_notice_remaining = OVERTIME_NOTICE_SECONDS
 
+    def simulation_now_ms(self) -> int:
+        """Return the match time reached by completed simulation steps."""
+        return self.match_started_at + round(self.match_elapsed * 1000)
+
+    def update_simulation(self) -> None:
+        """Advance every gameplay system by one fixed 50-millisecond step."""
+        self.update_match_state()
+        if self.match_finished:
+            return
+
+        self.elixir.update(FIXED_TIMESTEP_SECONDS, self.match_elapsed)
+        self.update_elixir_multiplier_notice(FIXED_TIMESTEP_SECONDS)
+        self.battle.update(FIXED_TIMESTEP_SECONDS)
+        # Rounding stops tiny floating-point errors from moving time boundaries.
+        self.match_elapsed = round(
+            self.match_elapsed + FIXED_TIMESTEP_SECONDS,
+            10,
+        )
+        self.update_match_state()
+        self.update_overtime_notice(FIXED_TIMESTEP_SECONDS)
+
     def finish_match(self, winner: str | None, current_ms: int) -> None:
         """Store a terminal result and cancel all pending player interaction."""
         self.match_finished = True
@@ -947,14 +1003,14 @@ class ArenaViewer:
     def update_elixir_multiplier_notice(self, delta_seconds: float) -> None:
         """Start or count down the announcement for an Elixir speed change.
 
-        Comparing the multiplier before and after this frame is safer than
+        Comparing the multiplier before and after this update is safer than
         checking for an exact timestamp. A 60 FPS game will almost never land
-        on exactly 120.000 seconds, and a slow frame may jump past the boundary.
+        on exactly 120.000 seconds.
         """
         if delta_seconds <= 0:
             return
 
-        # Existing notices lose the amount of time consumed by this frame.
+        # Existing notices lose the amount of time used by this update.
         self.elixir_multiplier_notice_remaining = max(
             0.0,
             self.elixir_multiplier_notice_remaining - delta_seconds,
@@ -967,7 +1023,7 @@ class ArenaViewer:
             self.match_elapsed + delta_seconds,
         )
 
-        # A larger value means this frame crossed into Double or Triple Elixir.
+        # A larger value means this update entered Double or Triple Elixir.
         if multiplier_after > multiplier_before:
             self.elixir_multiplier_notice = multiplier_after
             self.elixir_multiplier_notice_remaining = (
@@ -1630,14 +1686,14 @@ class ArenaViewer:
     def draw_match_timer(self) -> None:
         """Draw the match timer in the top-right corner.
 
-        The timer uses real elapsed time, so slow frames do not make the match
-        longer. The numbers turn red for the last ten seconds. At zero, the
-        match-over message appears.
+        The timer uses completed game updates, so it always agrees with combat.
+        The numbers turn red for the last ten seconds. At zero, the match-over
+        message appears.
         """
         timer_now_ms = (
             self.match_finished_at_ms
             if self.match_finished_at_ms is not None
-            else pygame.time.get_ticks()
+            else self.simulation_now_ms()
         )
         if self.overtime_active:
             if self.overtime_started_at_ms is None:
@@ -2351,24 +2407,26 @@ class ArenaViewer:
     def run(self) -> None:
         """Keep updating and drawing until the window closes.
 
-        ``Clock.tick`` limits the game to the target frame rate and tells us how
-        long the last frame took. Elixir uses that time, so it fills at the same
-        speed even if the frame rate changes.
+        Drawing can run at different speeds, but gameplay always moves forward
+        in exact 50-millisecond steps. Slow frames run several updates to catch
+        up. Fast frames save their extra time until the next update is ready.
         """
         while self.running:
-            delta_seconds = self.clock.tick(FPS) / 1000.0
+            frame_ms = self.clock.tick(FPS)
             self.handle_events()
 
             # A finished match remains visible and responsive to quit input,
             # but combat, Elixir generation, and the match clock are frozen.
-            self.update_match_state()
             if not self.match_finished:
-                self.elixir.update(delta_seconds, self.match_elapsed)
-                self.update_elixir_multiplier_notice(delta_seconds)
-                self.battle.update(delta_seconds)
-                self.match_elapsed += delta_seconds
                 self.update_match_state()
-                self.update_overtime_notice(delta_seconds)
+                step_count = self.fixed_timestep.add_frame_time(frame_ms)
+                for _ in range(step_count):
+                    self.update_simulation()
+                    if self.match_finished:
+                        break
+            else:
+                # Do not carry time spent on the result screen into a rematch.
+                self.fixed_timestep.reset()
             self.draw()
 
         pygame.quit()
