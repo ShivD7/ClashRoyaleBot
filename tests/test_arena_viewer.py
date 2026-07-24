@@ -343,6 +343,49 @@ def test_spells_can_target_any_arena_tile_while_troops_cannot() -> None:
     assert ArenaViewer.restricted_deployment_tiles(cards["Fireball"]) == ()
 
 
+@pytest.mark.parametrize("team", ("blue", "red"))
+def test_troops_can_be_deployed_on_bridges_but_not_in_water(
+    team: str,
+) -> None:
+    cards = {card.name: card for card in DEFAULT_DECK}
+    river = ArenaViewer.river_rectangle()
+    bridges = ArenaViewer.bridge_rectangles()
+    river_rows = range(
+        river.top // TILE_SIZE,
+        river.bottom // TILE_SIZE,
+    )
+
+    for row in river_rows:
+        for column in range(GRID_COLUMNS):
+            tile = (column, row)
+            tile_center = ArenaViewer.tile_rectangle(tile).center
+            is_on_bridge = any(
+                bridge.collidepoint(tile_center)
+                for bridge in bridges
+            )
+
+            assert ArenaViewer.is_valid_deployment_tile(
+                tile,
+                cards["Knight"],
+                team=team,
+            ) is is_on_bridge
+
+
+@pytest.mark.parametrize("team", ("blue", "red"))
+def test_buildings_cannot_be_deployed_on_bridges(team: str) -> None:
+    cards = {card.name: card for card in DEFAULT_DECK}
+    bridge_tile = ArenaViewer.screen_to_tile(
+        ArenaViewer.bridge_rectangles()[0].center,
+    )
+
+    assert bridge_tile is not None
+    assert not ArenaViewer.is_valid_deployment_tile(
+        bridge_tile,
+        cards["Cannon"],
+        team=team,
+    )
+
+
 def test_destroyed_princess_towers_unlock_their_enemy_lane_halves() -> None:
     knight = next(card for card in DEFAULT_DECK if card.name == "Knight")
     unlocked_row = ENEMY_DEPLOYMENT_UNLOCK_TOP // TILE_SIZE
