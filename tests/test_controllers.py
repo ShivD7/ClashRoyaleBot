@@ -1,4 +1,7 @@
+import pytest
+
 from arena_viewer import (
+    FIXED_TIMESTEP_SECONDS,
     ArenaViewer,
     DEFAULT_DECK,
     parse_controller_arguments,
@@ -111,6 +114,27 @@ def test_match_loop_runs_non_human_controller_but_not_human_controller() -> None
     assert not any(
         entity.team == "blue" and not entity.is_building
         for entity in viewer.battle.entities
+    )
+
+
+def test_fixed_simulation_step_updates_both_players_and_controllers() -> None:
+    viewer = make_controller_viewer()
+    viewer.match_started_at = 0
+    viewer.match_finished_at_ms = None
+    viewer.match_winner = None
+    viewer.overtime_active = False
+    viewer.overtime_started_at_ms = None
+    viewer.overtime_notice_remaining = 0.0
+    viewer.elixir_multiplier_notice = None
+    viewer.elixir_multiplier_notice_remaining = 0.0
+
+    viewer.update_simulation()
+
+    expected_elixir = 5 + FIXED_TIMESTEP_SECONDS / 2.8
+    assert viewer.players["blue"].elixir.amount == pytest.approx(expected_elixir)
+    assert viewer.players["red"].elixir.amount == pytest.approx(expected_elixir)
+    assert viewer.controller_decision_elapsed["red"] == pytest.approx(
+        FIXED_TIMESTEP_SECONDS,
     )
 
 
