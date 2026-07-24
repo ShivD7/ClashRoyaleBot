@@ -1,12 +1,12 @@
 import pytest
 
 from arena_viewer import (
+    ARENA_HEIGHT,
     DEFAULT_DECK,
     LEFT_LANE_X,
     RIGHT_LANE_X,
     RIVER_HEIGHT,
     RIVER_TOP,
-    SCREEN_HEIGHT,
     TILE_SIZE,
     TOWERS,
 )
@@ -17,7 +17,7 @@ def make_engine() -> BattleEngine:
     """Create the same deterministic level-11 engine used by the viewer."""
     return BattleEngine(
         tile_size=TILE_SIZE,
-        screen_height=SCREEN_HEIGHT,
+        screen_height=ARENA_HEIGHT,
         river_top=RIVER_TOP,
         river_height=RIVER_HEIGHT,
         bridge_x_positions=(LEFT_LANE_X, RIGHT_LANE_X),
@@ -200,6 +200,68 @@ def test_king_tower_activates_after_allied_princess_tower_dies() -> None:
     engine.update(0.01)
 
     assert red_king.active
+
+
+def test_destroyed_king_tower_finishes_and_freezes_the_battle() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    red_king = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "king"
+    )
+    red_king.take_damage(red_king.max_health)
+    position_at_match_end = knight.position.copy()
+
+    engine.update(1.0)
+
+    assert engine.winning_team == "blue"
+    assert knight.position == position_at_match_end
+    assert engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    ) == ()
+
+
+def test_crown_scores_track_destroyed_towers_for_both_teams() -> None:
+    engine = make_engine()
+    red_princesses = [
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "princess"
+    ]
+    blue_princess = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "blue" and entity.tower_kind == "princess"
+    )
+
+    assert engine.crown_scores == {"red": 0, "blue": 0}
+
+    red_princesses[0].take_damage(red_princesses[0].max_health)
+    blue_princess.take_damage(blue_princess.max_health)
+    assert engine.crown_scores == {"red": 1, "blue": 1}
+
+    red_princesses[1].take_damage(red_princesses[1].max_health)
+    assert engine.crown_scores == {"red": 1, "blue": 2}
+
+
+def test_destroying_king_tower_completes_score_at_three_crowns() -> None:
+    engine = make_engine()
+    red_king = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "king"
+    )
+
+    red_king.take_damage(red_king.max_health)
+
+    assert engine.crowns_for("blue") == 3
 
 
 def test_fireball_uses_reduced_damage_against_crown_towers() -> None:

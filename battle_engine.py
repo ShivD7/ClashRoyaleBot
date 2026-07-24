@@ -153,6 +153,59 @@ class BattleEngine:
         """Return a stable snapshot of all currently targetable entities."""
         return tuple(entity for entity in self.entities if entity.is_alive)
 
+    @property
+    def winning_team(self) -> str | None:
+        """Return the winner after a King Tower dies, otherwise ``None``."""
+        destroyed_king = next(
+            (
+                entity
+                for entity in self.entities
+                if entity.tower_kind == "king" and not entity.is_alive
+            ),
+            None,
+        )
+        if destroyed_king is None:
+            return None
+        return "blue" if destroyed_king.team == "red" else "red"
+
+    def crowns_for(self, team: str) -> int:
+        """Return the team's live battle score from destroyed enemy towers.
+
+        Each Princess Tower is worth one crown. Destroying the King Tower ends
+        the battle and completes the attacker's score at three crowns, even if
+        one or both Princess Towers were still standing.
+        """
+        if team not in {"red", "blue"}:
+            raise ValueError("Team must be 'red' or 'blue'")
+
+        enemy_team = "red" if team == "blue" else "blue"
+        enemy_towers = [
+            entity
+            for entity in self.entities
+            if entity.team == enemy_team and entity.is_building
+        ]
+        enemy_king = next(
+            tower
+            for tower in enemy_towers
+            if tower.tower_kind == "king"
+        )
+        if not enemy_king.is_alive:
+            return 3
+
+        return sum(
+            not tower.is_alive
+            for tower in enemy_towers
+            if tower.tower_kind == "princess"
+        )
+
+    @property
+    def crown_scores(self) -> dict[str, int]:
+        """Return both team scores for UI, observations, and rewards."""
+        return {
+            "red": self.crowns_for("red"),
+            "blue": self.crowns_for("blue"),
+        }
+
     def entity_by_id(self, entity_id: int | None) -> BattleEntity | None:
         """Find an entity by its stable ID."""
         if entity_id is None:
@@ -219,6 +272,11 @@ class BattleEngine:
         position: tuple[int, int],
     ) -> tuple[BattleEntity, ...]:
         """Spawn all units from a troop card or resolve a spell immediately."""
+        # A destroyed King Tower is a terminal state. Training code and the UI
+        # cannot accidentally add actions to a battle that has already ended.
+        if self.winning_team is not None:
+            return ()
+
         if card.card_type == "spell":
             self.cast_spell(card, team, position)
             return ()
@@ -316,7 +374,7 @@ class BattleEngine:
 
     def update(self, delta_seconds: float) -> None:
         """Advance a deterministic slice of battle time."""
-        if delta_seconds <= 0:
+        if delta_seconds <= 0 or self.winning_team is not None:
             return
 
         self._activate_king_towers()
@@ -347,6 +405,8 @@ class BattleEngine:
             if self._is_in_attack_range(entity, target):
                 entity.state = EntityState.ATTACKING
                 self._attack_if_ready(entity, target)
+                if self.winning_team is not None:
+                    break
             elif entity.is_building:
                 # Towers cannot move and keep their lock while the target lives.
                 entity.state = EntityState.ATTACKING
@@ -354,7 +414,8 @@ class BattleEngine:
                 entity.state = EntityState.MOVING
                 self._move_toward_target(entity, target, delta_seconds)
 
-        self._update_projectiles(delta_seconds)
+        if self.winning_team is None:
+            self._update_projectiles(delta_seconds)
         self._activate_king_towers()
 
     def _acquire_target(self, entity: BattleEntity) -> BattleEntity | None:
@@ -509,6 +570,8 @@ class BattleEngine:
 
             if distance <= step + target.radius:
                 target.take_damage(projectile.damage)
+                if self.winning_team is not None:
+                    break
                 continue
 
             if distance > 0:

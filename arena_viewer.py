@@ -30,15 +30,27 @@ from battle_engine import (
 # ---------------------------------------------------------------------------
 # Screen and arena settings
 # ---------------------------------------------------------------------------
-# The arena has 18 columns and 32 rows. Position (0, 0) is the top-left corner.
-# X moves to the right, and Y moves down.
-SCREEN_WIDTH = 450
-SCREEN_HEIGHT = 800
+# The playable arena remains an 18-by-32 grid. Non-playable stadium sidelines
+# widen the window without changing any tile or battle dimensions.
+ARENA_WIDTH = 450
+STADIUM_BUFFER_WIDTH = 70
+ARENA_LEFT = STADIUM_BUFFER_WIDTH
+ARENA_RIGHT = ARENA_LEFT + ARENA_WIDTH
+SCREEN_WIDTH = ARENA_WIDTH + STADIUM_BUFFER_WIDTH * 2
+ARENA_HEIGHT = 800
+HUD_HEIGHT = 153
+SCREEN_HEIGHT = ARENA_HEIGHT + HUD_HEIGHT
+# Draw at the full logical resolution, then uniformly shrink the finished frame
+# for the actual desktop window. Game coordinates and RL observations therefore
+# remain unchanged while the entire arena fits comfortably on smaller screens.
+WINDOW_SCALE = 0.75
+WINDOW_WIDTH = int(SCREEN_WIDTH * WINDOW_SCALE + 0.5)
+WINDOW_HEIGHT = int(SCREEN_HEIGHT * WINDOW_SCALE + 0.5)
 GRID_COLUMNS = 18
 GRID_ROWS = 32
 TILE_SIZE = 25
 RIVER_HEIGHT = TILE_SIZE * 2
-RIVER_TOP = (SCREEN_HEIGHT - RIVER_HEIGHT) // 2
+RIVER_TOP = (ARENA_HEIGHT - RIVER_HEIGHT) // 2
 # Destroying an enemy Princess Tower unlocks that lane from the river to one
 # grid row below the midpoint of the enemy half. The small offset keeps the
 # forward placement boundary from reaching too deeply into enemy territory.
@@ -75,14 +87,22 @@ TIMER_PANEL_COLOR = (16, 18, 20)
 TIMER_BORDER_COLOR = (72, 77, 82)
 TIMER_SHADOW_COLOR = (0, 0, 0, 125)
 TIMER_URGENT_COLOR = (255, 92, 84)
+STADIUM_FLOOR_COLOR = (82, 67, 53)
+STADIUM_TIER_COLOR = (103, 84, 63)
+STADIUM_RAIL_COLOR = (154, 145, 124)
+SPECTATOR_SKIN_COLOR = (221, 171, 121)
 
 # ---------------------------------------------------------------------------
 # Arena layout
 # ---------------------------------------------------------------------------
 # These positions place the towers and bridges in the middle of their tiles.
 # Reusing them keeps the towers and bridges lined up.
-LEFT_LANE_X = (SCREEN_WIDTH // 4) // TILE_SIZE * TILE_SIZE + TILE_SIZE // 2
-RIGHT_LANE_X = SCREEN_WIDTH - LEFT_LANE_X
+LEFT_LANE_X = (
+    ARENA_LEFT
+    + (ARENA_WIDTH // 4) // TILE_SIZE * TILE_SIZE
+    + TILE_SIZE // 2
+)
+RIGHT_LANE_X = ARENA_RIGHT - (LEFT_LANE_X - ARENA_LEFT)
 CENTER_LANE_X = SCREEN_WIDTH // 2
 TOP_KING_Y = TILE_SIZE * 4
 TOP_PRINCESS_Y = TILE_SIZE * 8
@@ -108,12 +128,12 @@ ELIXIR_FRAME_COLOR = (30, 18, 40)
 # The temporary card HUD sits immediately above the Elixir bar. Keeping these
 # measurements together makes both drawing and mouse hit-testing use the same
 # rectangles.
-HAND_HUD_TOP = SCREEN_HEIGHT - 153
+HAND_HUD_TOP = ARENA_HEIGHT
 CARD_WIDTH = 72
 CARD_HEIGHT = 84
 CARD_GAP = 6
-CARD_START_X = 8
-NEXT_CARD_X = 360
+CARD_START_X = ARENA_LEFT + 8
+NEXT_CARD_X = ARENA_LEFT + 360
 # Affordable cards use this normal dark-blue face.
 CARD_BACKGROUND_COLOR = (45, 53, 66)
 # Unaffordable cards start darker and receive the transparent overlay below.
@@ -420,14 +440,14 @@ TOWERS = (
     Tower(
         "princess",
         "blue",
-        (LEFT_LANE_X, SCREEN_HEIGHT - TOP_PRINCESS_Y),
+        (LEFT_LANE_X, ARENA_HEIGHT - TOP_PRINCESS_Y),
     ),
     Tower(
         "princess",
         "blue",
-        (RIGHT_LANE_X, SCREEN_HEIGHT - TOP_PRINCESS_Y),
+        (RIGHT_LANE_X, ARENA_HEIGHT - TOP_PRINCESS_Y),
     ),
-    Tower("king", "blue", (CENTER_LANE_X, SCREEN_HEIGHT - TOP_KING_Y)),
+    Tower("king", "blue", (CENTER_LANE_X, ARENA_HEIGHT - TOP_KING_Y)),
 )
 
 
@@ -463,8 +483,14 @@ class ArenaViewer:
         pygame.init()
         pygame.display.set_caption("Royale Simulator - Grid Arena")
 
-        # Create the window and fonts once instead of rebuilding them each frame.
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        # All drawing uses the full logical canvas. Only the final frame is
+        # scaled into the smaller desktop window.
+        self.display_surface = pygame.display.set_mode(
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+        )
+        self.screen = pygame.Surface(
+            (SCREEN_WIDTH, SCREEN_HEIGHT),
+        ).convert()
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 26)
         self.timer_label_font = pygame.font.Font(None, 19)
@@ -496,7 +522,7 @@ class ArenaViewer:
         self.deployments: list[Deployment] = []
         self.battle = BattleEngine(
             tile_size=TILE_SIZE,
-            screen_height=SCREEN_HEIGHT,
+            screen_height=ARENA_HEIGHT,
             river_top=RIVER_TOP,
             river_height=RIVER_HEIGHT,
             bridge_x_positions=(LEFT_LANE_X, RIGHT_LANE_X),
@@ -506,10 +532,24 @@ class ArenaViewer:
             ),
         )
         self.match_elapsed = 0.0
+        self.match_finished = False
+        self.match_winner: str | None = None
+        self.match_finished_at_ms: int | None = None
 
     # ------------------------------------------------------------------
     # Position and movement helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def display_to_logical_position(
+        position: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Map a point in the scaled window back onto the logical canvas."""
+        display_x, display_y = position
+        return (
+            int(display_x * SCREEN_WIDTH / WINDOW_WIDTH),
+            int(display_y * SCREEN_HEIGHT / WINDOW_HEIGHT),
+        )
+
     @staticmethod
     def screen_to_tile(position: tuple[int, int]) -> tuple[int, int] | None:
         """Change a screen position into a tile position.
@@ -518,10 +558,13 @@ class ArenaViewer:
         """
         mouse_x, mouse_y = position
 
-        if not (0 <= mouse_x < SCREEN_WIDTH and 0 <= mouse_y < SCREEN_HEIGHT):
+        if not (
+            ARENA_LEFT <= mouse_x < ARENA_RIGHT
+            and 0 <= mouse_y < ARENA_HEIGHT
+        ):
             return None
 
-        column = mouse_x // TILE_SIZE
+        column = (mouse_x - ARENA_LEFT) // TILE_SIZE
         row = mouse_y // TILE_SIZE
         return column, row
 
@@ -530,7 +573,7 @@ class ArenaViewer:
         """Return the screen rectangle occupied by a tile."""
         column, row = tile
         return pygame.Rect(
-            column * TILE_SIZE,
+            ARENA_LEFT + column * TILE_SIZE,
             row * TILE_SIZE,
             TILE_SIZE,
             TILE_SIZE,
@@ -539,7 +582,12 @@ class ArenaViewer:
     @staticmethod
     def river_rectangle() -> pygame.Rect:
         """Return a horizontal river centered exactly within the arena."""
-        return pygame.Rect(0, RIVER_TOP, SCREEN_WIDTH, RIVER_HEIGHT)
+        return pygame.Rect(
+            ARENA_LEFT,
+            RIVER_TOP,
+            ARENA_WIDTH,
+            RIVER_HEIGHT,
+        )
 
     @staticmethod
     def bridge_rectangles() -> tuple[pygame.Rect, pygame.Rect]:
@@ -551,7 +599,7 @@ class ArenaViewer:
 
         for center_x in (LEFT_LANE_X, RIGHT_LANE_X):
             bridge = pygame.Rect(0, 0, BRIDGE_WIDTH, BRIDGE_HEIGHT)
-            bridge.center = (center_x, SCREEN_HEIGHT // 2)
+            bridge.center = (center_x, ARENA_HEIGHT // 2)
             bridges.append(bridge)
 
         return bridges[0], bridges[1]
@@ -698,6 +746,9 @@ class ArenaViewer:
 
     def try_play_selected_card(self, tile: tuple[int, int]) -> bool:
         """Deploy the selected card and cycle only when every rule succeeds."""
+        if getattr(self, "match_finished", False):
+            return False
+
         if self.selected_card_index is None:
             return False
 
@@ -728,6 +779,29 @@ class ArenaViewer:
         # Require a deliberate selection before another card can be played.
         self.selected_card_index = None
         return True
+
+    def update_match_state(self, now_ms: int | None = None) -> None:
+        """Finish the match when time expires or either King Tower dies."""
+        if self.match_finished:
+            return
+
+        current_ms = pygame.time.get_ticks() if now_ms is None else now_ms
+        winner = self.battle.winning_team
+        time_expired = remaining_match_seconds(
+            self.match_started_at,
+            current_ms,
+        ) == 0
+        if winner is None and not time_expired:
+            return
+
+        self.match_finished = True
+        self.match_winner = winner
+        self.match_finished_at_ms = current_ms
+        # Clear interaction state so a held or selected card cannot be played
+        # after the final tower-destroying attack lands.
+        self.selected_card_index = None
+        self.dragged_card_index = None
+        self.drag_position = None
 
     def begin_card_drag(
         self,
@@ -791,18 +865,19 @@ class ArenaViewer:
                     self.drag_position = None
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                logical_position = self.display_to_logical_position(event.pos)
                 # Check the hand before converting the click into an arena tile.
-                clicked_hand_index = self.hand_index_at(event.pos)
+                clicked_hand_index = self.hand_index_at(logical_position)
                 if clicked_hand_index is not None:
-                    self.begin_card_drag(clicked_hand_index, event.pos)
+                    self.begin_card_drag(clicked_hand_index, logical_position)
                     continue
 
                 # The whole HUD is outside the playable arena, even though the
                 # screen-to-grid conversion can mathematically produce a tile.
-                if event.pos[1] >= HAND_HUD_TOP:
+                if logical_position[1] >= HAND_HUD_TOP:
                     continue
 
-                clicked_tile = self.screen_to_tile(event.pos)
+                clicked_tile = self.screen_to_tile(logical_position)
                 if clicked_tile is not None:
                     # Keep the outline even when the attempted play is invalid.
                     self.selected_tile = clicked_tile
@@ -810,11 +885,15 @@ class ArenaViewer:
 
             elif event.type == pygame.MOUSEMOTION:
                 if self.dragged_card_index is not None:
-                    self.drag_position = event.pos
+                    self.drag_position = self.display_to_logical_position(
+                        event.pos,
+                    )
 
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 if self.dragged_card_index is not None:
-                    self.finish_card_drag(event.pos)
+                    self.finish_card_drag(
+                        self.display_to_logical_position(event.pos),
+                    )
 
     # ------------------------------------------------------------------
     # Draw the arena and buildings
@@ -824,7 +903,13 @@ class ArenaViewer:
 
         Bridges are drawn last so they appear on top of the water and grid.
         """
-        self.screen.fill(ARENA_COLOR)
+        self.screen.fill(STADIUM_FLOOR_COLOR)
+        self.draw_stadium_sidelines()
+        pygame.draw.rect(
+            self.screen,
+            ARENA_COLOR,
+            (ARENA_LEFT, 0, ARENA_WIDTH, ARENA_HEIGHT),
+        )
 
         for row in range(GRID_ROWS):
             for column in range(GRID_COLUMNS):
@@ -842,18 +927,18 @@ class ArenaViewer:
             pygame.draw.line(
                 self.screen,
                 RIVER_HIGHLIGHT_COLOR,
-                (0, y),
-                (SCREEN_WIDTH, y),
+                (ARENA_LEFT, y),
+                (ARENA_RIGHT, y),
                 2,
             )
 
         for column in range(GRID_COLUMNS + 1):
-            x = column * TILE_SIZE
+            x = ARENA_LEFT + column * TILE_SIZE
             pygame.draw.line(
                 self.screen,
                 GRID_COLOR,
                 (x, 0),
-                (x, SCREEN_HEIGHT),
+                (x, ARENA_HEIGHT),
                 1,
             )
 
@@ -862,12 +947,77 @@ class ArenaViewer:
             pygame.draw.line(
                 self.screen,
                 GRID_COLOR,
-                (0, y),
-                (SCREEN_WIDTH, y),
+                (ARENA_LEFT, y),
+                (ARENA_RIGHT, y),
                 1,
             )
 
         self.draw_bridges()
+
+    def draw_stadium_sidelines(self) -> None:
+        """Draw decorative, non-playable stands outside both arena edges."""
+        for side_left in (0, ARENA_RIGHT):
+            side = pygame.Rect(
+                side_left,
+                0,
+                STADIUM_BUFFER_WIDTH,
+                SCREEN_HEIGHT,
+            )
+            pygame.draw.rect(self.screen, STADIUM_FLOOR_COLOR, side)
+
+            # Horizontal bands suggest stepped wooden/stone spectator seating.
+            for y in range(0, HAND_HUD_TOP, 32):
+                pygame.draw.rect(
+                    self.screen,
+                    STADIUM_TIER_COLOR,
+                    (side.left, y + 24, side.width, 5),
+                )
+
+            # Two columns of simple spectators keep the boundary lively without
+            # introducing gameplay-like shapes inside the actual grid.
+            for row, y in enumerate(range(18, HAND_HUD_TOP - 8, 32)):
+                team_color = (
+                    RED_TEAM_COLOR
+                    if y < ARENA_HEIGHT // 2
+                    else BLUE_TEAM_COLOR
+                )
+                for column, local_x in enumerate((18, 48)):
+                    spectator_x = side.left + local_x
+                    spectator_y = y + ((row + column) % 2) * 3
+                    pygame.draw.circle(
+                        self.screen,
+                        (45, 39, 34),
+                        (spectator_x + 1, spectator_y + 2),
+                        7,
+                    )
+                    pygame.draw.rect(
+                        self.screen,
+                        team_color,
+                        (spectator_x - 6, spectator_y + 2, 12, 8),
+                        border_radius=3,
+                    )
+                    pygame.draw.circle(
+                        self.screen,
+                        SPECTATOR_SKIN_COLOR,
+                        (spectator_x, spectator_y - 2),
+                        4,
+                    )
+
+        # Raised rails clearly separate the decorative stands from legal tiles.
+        pygame.draw.line(
+            self.screen,
+            STADIUM_RAIL_COLOR,
+            (ARENA_LEFT - 3, 0),
+            (ARENA_LEFT - 3, HAND_HUD_TOP),
+            5,
+        )
+        pygame.draw.line(
+            self.screen,
+            STADIUM_RAIL_COLOR,
+            (ARENA_RIGHT + 2, 0),
+            (ARENA_RIGHT + 2, HAND_HUD_TOP),
+            5,
+        )
 
     def draw_bridges(self) -> None:
         """Draw a wooden bridge in each tower lane.
@@ -1243,7 +1393,9 @@ class ArenaViewer:
         The mouse highlight is see-through. The selected tile uses a solid
         border and stays selected until it is cleared.
         """
-        hovered_tile = self.screen_to_tile(pygame.mouse.get_pos())
+        hovered_tile = self.screen_to_tile(
+            self.display_to_logical_position(pygame.mouse.get_pos()),
+        )
 
         if hovered_tile is not None:
             hover_surface = pygame.Surface(
@@ -1271,9 +1423,14 @@ class ArenaViewer:
         longer. The numbers turn red for the last ten seconds. At zero, the
         match-over message appears.
         """
+        timer_now_ms = (
+            self.match_finished_at_ms
+            if self.match_finished_at_ms is not None
+            else pygame.time.get_ticks()
+        )
         seconds_left = remaining_match_seconds(
             self.match_started_at,
-            pygame.time.get_ticks(),
+            timer_now_ms,
         )
 
         panel = pygame.Rect(SCREEN_WIDTH - 111, 6, 105, 63)
@@ -1313,19 +1470,24 @@ class ArenaViewer:
         )
         self.screen.blit(time_text, time_position)
 
-        if seconds_left == 0:
+        if self.match_finished:
             self.draw_match_over()
 
     def draw_match_over(self) -> None:
-        """Show a see-through message in the center when time runs out."""
-        banner_text = self.match_over_font.render("MATCH OVER", True, TEXT_COLOR)
+        """Show the result after time expires or a King Tower is destroyed."""
+        result = (
+            f"{self.match_winner.upper()} WINS"
+            if self.match_winner is not None
+            else "MATCH OVER"
+        )
+        banner_text = self.match_over_font.render(result, True, TEXT_COLOR)
         banner = pygame.Rect(
             0,
             0,
             banner_text.get_width() + 34,
             banner_text.get_height() + 20,
         )
-        banner.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        banner.center = (SCREEN_WIDTH // 2, ARENA_HEIGHT // 2)
 
         overlay = pygame.Surface(banner.size, pygame.SRCALPHA)
         pygame.draw.rect(
@@ -1349,6 +1511,88 @@ class ArenaViewer:
             ),
         )
         self.screen.blit(overlay, banner.topleft)
+
+    def draw_crown_scores(self) -> None:
+        """Draw compact red and blue Crown counters on the arena's left edge."""
+        scores = self.battle.crown_scores
+        counter_width = 54
+        counter_height = 34
+        counter_x = 6
+        counter_positions = {
+            "red": RIVER_TOP - counter_height - 8,
+            "blue": RIVER_TOP + RIVER_HEIGHT + 8,
+        }
+
+        for team in ("red", "blue"):
+            main_color, light_color = self.team_colors(team)
+            panel = pygame.Rect(
+                counter_x,
+                counter_positions[team],
+                counter_width,
+                counter_height,
+            )
+
+            # A dark offset keeps this small HUD readable over grass and grid.
+            shadow_surface = pygame.Surface(panel.size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                shadow_surface,
+                (20, 24, 28, 85),
+                shadow_surface.get_rect(),
+                border_radius=7,
+            )
+            self.screen.blit(shadow_surface, panel.move(2, 3).topleft)
+
+            # Draw the team-colored box on an alpha surface so the stadium and
+            # spectators remain visible beneath it. The crown and number are
+            # drawn afterward at full opacity for legibility.
+            panel_surface = pygame.Surface(panel.size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                panel_surface,
+                (*main_color, 155),
+                panel_surface.get_rect(),
+                border_radius=7,
+            )
+            pygame.draw.rect(
+                panel_surface,
+                (*light_color, 205),
+                panel_surface.get_rect(),
+                2,
+                border_radius=7,
+            )
+            self.screen.blit(panel_surface, panel.topleft)
+
+            # The three-point polygon mirrors Clash Royale's gold crown symbol.
+            crown_x = panel.x + 15
+            crown_y = panel.centery
+            crown_points = [
+                (crown_x - 9, crown_y - 7),
+                (crown_x - 4, crown_y - 2),
+                (crown_x, crown_y - 9),
+                (crown_x + 4, crown_y - 2),
+                (crown_x + 9, crown_y - 7),
+                (crown_x + 7, crown_y + 7),
+                (crown_x - 7, crown_y + 7),
+            ]
+            pygame.draw.polygon(self.screen, CROWN_COLOR, crown_points)
+            pygame.draw.line(
+                self.screen,
+                CROWN_SHADOW_COLOR,
+                (crown_x - 7, crown_y + 3),
+                (crown_x + 7, crown_y + 3),
+                2,
+            )
+
+            score_text = self.font.render(
+                str(scores[team]),
+                True,
+                TEXT_COLOR,
+            )
+            self.screen.blit(
+                score_text,
+                score_text.get_rect(
+                    center=(panel.x + 40, panel.centery + 1),
+                ),
+            )
 
     def draw_card(
         self,
@@ -1541,7 +1785,12 @@ class ArenaViewer:
         hud.fill((18, 13, 28, 215))
         self.screen.blit(hud, (0, SCREEN_HEIGHT - 53))
 
-        bar_rect = pygame.Rect(54, SCREEN_HEIGHT - 31, 382, 22)
+        bar_rect = pygame.Rect(
+            ARENA_LEFT + 54,
+            SCREEN_HEIGHT - 31,
+            382,
+            22,
+        )
         pygame.draw.rect(
             self.screen,
             ELIXIR_FRAME_COLOR,
@@ -1583,7 +1832,7 @@ class ArenaViewer:
                     )
 
         # The teardrop badge mirrors the large count at the left of the real HUD.
-        badge_center = (28, SCREEN_HEIGHT - 21)
+        badge_center = (ARENA_LEFT + 28, SCREEN_HEIGHT - 21)
         pygame.draw.polygon(
             self.screen,
             ELIXIR_FRAME_COLOR,
@@ -1607,7 +1856,7 @@ class ArenaViewer:
         pygame.draw.arc(
             self.screen,
             ELIXIR_HIGHLIGHT_COLOR,
-            pygame.Rect(15, SCREEN_HEIGHT - 38, 26, 25),
+            pygame.Rect(ARENA_LEFT + 15, SCREEN_HEIGHT - 38, 26, 25),
             1.7,
             3.8,
             3,
@@ -1673,9 +1922,15 @@ class ArenaViewer:
         self.draw_projectiles()
         self.draw_tile_highlights()
         self.draw_match_timer()
+        self.draw_crown_scores()
         self.draw_card_hand()
         self.draw_elixir_bar()
         self.draw_dragged_card()
+        pygame.transform.smoothscale(
+            self.screen,
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            self.display_surface,
+        )
         pygame.display.flip()
 
     def run(self) -> None:
@@ -1689,10 +1944,14 @@ class ArenaViewer:
             delta_seconds = self.clock.tick(FPS) / 1000.0
             self.handle_events()
 
-            # Update the game before drawing the new values.
-            self.elixir.update(delta_seconds, self.match_elapsed)
-            self.battle.update(delta_seconds)
-            self.match_elapsed += delta_seconds
+            # A finished match remains visible and responsive to quit input,
+            # but combat, Elixir generation, and the match clock are frozen.
+            self.update_match_state()
+            if not self.match_finished:
+                self.elixir.update(delta_seconds, self.match_elapsed)
+                self.battle.update(delta_seconds)
+                self.match_elapsed += delta_seconds
+                self.update_match_state()
             self.draw()
 
         pygame.quit()

@@ -1,10 +1,17 @@
+from types import SimpleNamespace
+
 import pytest
 
 from arena_viewer import (
+    ARENA_HEIGHT,
+    ARENA_LEFT,
+    ARENA_RIGHT,
+    ARENA_WIDTH,
     DEFAULT_DECK,
     ENEMY_DEPLOYMENT_UNLOCK_TOP,
     GRID_COLUMNS,
     GRID_ROWS,
+    HUD_HEIGHT,
     LEFT_LANE_X,
     MATCH_DURATION_SECONDS,
     RIGHT_LANE_X,
@@ -18,6 +25,9 @@ from arena_viewer import (
     SCREEN_WIDTH,
     TILE_SIZE,
     TOWERS,
+    WINDOW_HEIGHT,
+    WINDOW_SCALE,
+    WINDOW_WIDTH,
     format_match_time,
     remaining_match_seconds,
 )
@@ -25,24 +35,59 @@ from battle_engine import BattleEngine
 
 
 def test_screen_positions_convert_to_expected_tiles() -> None:
-    assert ArenaViewer.screen_to_tile((0, 0)) == (0, 0)
-    assert ArenaViewer.screen_to_tile((24, 24)) == (0, 0)
-    assert ArenaViewer.screen_to_tile((25, 25)) == (1, 1)
-    assert ArenaViewer.screen_to_tile((449, SCREEN_HEIGHT - 1)) == (
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT, 0)) == (0, 0)
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT + 24, 24)) == (0, 0)
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT + 25, 25)) == (1, 1)
+    assert ArenaViewer.screen_to_tile(
+        (ARENA_RIGHT - 1, ARENA_HEIGHT - 1),
+    ) == (
         17,
-        (SCREEN_HEIGHT - 1) // TILE_SIZE,
+        (ARENA_HEIGHT - 1) // TILE_SIZE,
     )
 
 
 def test_positions_outside_arena_are_rejected() -> None:
     assert ArenaViewer.screen_to_tile((-1, 0)) is None
-    assert ArenaViewer.screen_to_tile((0, -1)) is None
-    assert ArenaViewer.screen_to_tile((450, 0)) is None
-    assert ArenaViewer.screen_to_tile((0, SCREEN_HEIGHT)) is None
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT, -1)) is None
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT - 1, 0)) is None
+    assert ArenaViewer.screen_to_tile((ARENA_RIGHT, 0)) is None
+    assert ArenaViewer.screen_to_tile((ARENA_LEFT, ARENA_HEIGHT)) is None
+
+
+def test_stadium_buffers_do_not_change_playable_grid_width() -> None:
+    assert ARENA_WIDTH == GRID_COLUMNS * TILE_SIZE
+    assert SCREEN_WIDTH == ARENA_WIDTH + ARENA_LEFT * 2
+
+
+def test_scaled_window_preserves_logical_arena_and_card_input() -> None:
+    assert WINDOW_SCALE == 0.75
+    assert WINDOW_WIDTH < SCREEN_WIDTH
+    assert WINDOW_HEIGHT < SCREEN_HEIGHT
+
+    logical_tile_center = (ARENA_LEFT + TILE_SIZE // 2, TILE_SIZE // 2)
+    display_tile_center = (
+        round(logical_tile_center[0] * WINDOW_WIDTH / SCREEN_WIDTH),
+        round(logical_tile_center[1] * WINDOW_HEIGHT / SCREEN_HEIGHT),
+    )
+    remapped_tile_center = ArenaViewer.display_to_logical_position(
+        display_tile_center,
+    )
+    assert ArenaViewer.screen_to_tile(remapped_tile_center) == (0, 0)
+
+    first_card = ArenaViewer.hand_card_rectangles()[0]
+    display_card_center = (
+        round(first_card.centerx * WINDOW_WIDTH / SCREEN_WIDTH),
+        round(first_card.centery * WINDOW_HEIGHT / SCREEN_HEIGHT),
+    )
+    remapped_card_center = ArenaViewer.display_to_logical_position(
+        display_card_center,
+    )
+    assert ArenaViewer.hand_index_at(remapped_card_center) == 0
 
 
 def test_arena_height_matches_all_grid_rows() -> None:
-    assert SCREEN_HEIGHT == 800
+    assert ARENA_HEIGHT == GRID_ROWS * TILE_SIZE
+    assert SCREEN_HEIGHT == ARENA_HEIGHT + HUD_HEIGHT
 
 
 def test_each_team_has_two_princess_towers_and_one_king_tower() -> None:
@@ -56,7 +101,7 @@ def test_each_team_has_two_princess_towers_and_one_king_tower() -> None:
 def test_tower_layout_is_mirrored_across_the_arena() -> None:
     red_towers = {(tower.kind, tower.center) for tower in TOWERS if tower.team == "red"}
     mirrored_blue_towers = {
-        (tower.kind, (tower.center[0], SCREEN_HEIGHT - tower.center[1]))
+        (tower.kind, (tower.center[0], ARENA_HEIGHT - tower.center[1]))
         for tower in TOWERS
         if tower.team == "blue"
     }
@@ -293,7 +338,7 @@ def test_live_destroyed_tower_immediately_updates_ground_card_placement() -> Non
     viewer.deployments = []
     viewer.battle = BattleEngine(
         tile_size=TILE_SIZE,
-        screen_height=SCREEN_HEIGHT,
+        screen_height=ARENA_HEIGHT,
         river_top=RIVER_TOP,
         river_height=RIVER_HEIGHT,
         bridge_x_positions=(LEFT_LANE_X, RIGHT_LANE_X),
@@ -319,6 +364,27 @@ def test_live_destroyed_tower_immediately_updates_ground_card_placement() -> Non
 
     assert viewer.destroyed_enemy_princess_lanes() == frozenset({"left"})
     assert viewer.try_play_selected_card(unlocked_left_tile)
+
+
+def test_king_tower_winner_finishes_viewer_and_clears_card_interaction() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.match_finished = False
+    viewer.match_winner = None
+    viewer.match_finished_at_ms = None
+    viewer.match_started_at = 1_000
+    viewer.battle = SimpleNamespace(winning_team="blue")
+    viewer.selected_card_index = 2
+    viewer.dragged_card_index = 2
+    viewer.drag_position = (100, 100)
+
+    viewer.update_match_state(now_ms=2_000)
+
+    assert viewer.match_finished
+    assert viewer.match_winner == "blue"
+    assert viewer.match_finished_at_ms == 2_000
+    assert viewer.selected_card_index is None
+    assert viewer.dragged_card_index is None
+    assert viewer.drag_position is None
 
 
 def test_fireball_can_be_deployed_in_enemy_territory() -> None:
@@ -403,7 +469,9 @@ def test_dragging_card_to_valid_tile_deploys_and_clears_drag_state() -> None:
 
     assert viewer.selected_card_index == 0
     assert viewer.dragged_card_index == 0
-    assert viewer.finish_card_drag((5 * TILE_SIZE + 12, 20 * TILE_SIZE + 12))
+    assert viewer.finish_card_drag(
+        (ARENA_LEFT + 5 * TILE_SIZE + 12, 20 * TILE_SIZE + 12),
+    )
     assert viewer.deployments[0].tile == (5, 20)
     assert viewer.dragged_card_index is None
     assert viewer.drag_position is None
@@ -420,7 +488,9 @@ def test_dragging_card_to_restricted_tile_does_not_spend_elixir() -> None:
 
     viewer.begin_card_drag(0, (44, 700))
 
-    assert not viewer.finish_card_drag((5 * TILE_SIZE + 12, 5 * TILE_SIZE + 12))
+    assert not viewer.finish_card_drag(
+        (ARENA_LEFT + 5 * TILE_SIZE + 12, 5 * TILE_SIZE + 12),
+    )
     assert viewer.elixir.amount == 5
     assert viewer.deployments == []
     assert viewer.dragged_card_index is None
@@ -429,7 +499,7 @@ def test_dragging_card_to_restricted_tile_does_not_spend_elixir() -> None:
 def test_river_is_centered_vertically() -> None:
     river = ArenaViewer.river_rectangle()
 
-    assert river.centery == SCREEN_HEIGHT // 2
+    assert river.centery == ARENA_HEIGHT // 2
 
 
 def test_match_duration_is_three_minutes() -> None:
