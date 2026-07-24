@@ -589,6 +589,58 @@ def test_king_tower_activates_after_allied_princess_tower_dies() -> None:
     assert red_king.active
 
 
+@pytest.mark.parametrize(
+    ("king_team", "spell_team"),
+    (("red", "blue"), ("blue", "red")),
+)
+def test_spell_damage_activates_king_tower_early(
+    king_team: str,
+    spell_team: str,
+) -> None:
+    engine = make_engine()
+    king = next(
+        entity
+        for entity in engine.entities
+        if entity.team == king_team and entity.tower_kind == "king"
+    )
+    allied_princesses = [
+        entity
+        for entity in engine.entities
+        if entity.team == king_team and entity.tower_kind == "princess"
+    ]
+    starting_health = king.health
+
+    assert not king.active
+    assert all(tower.is_alive for tower in allied_princesses)
+
+    engine.deploy_card(
+        card_named("Fireball"),
+        spell_team,
+        (round(king.position.x), round(king.position.y)),
+    )
+
+    assert king.health < starting_health
+    assert king.active
+    assert all(tower.is_alive for tower in allied_princesses)
+
+
+def test_spell_that_misses_king_tower_does_not_activate_it() -> None:
+    engine = make_engine()
+    red_king = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "king"
+    )
+
+    engine.deploy_card(
+        card_named("Fireball"),
+        "blue",
+        (round(red_king.position.x), round(red_king.position.y + 250)),
+    )
+
+    assert not red_king.active
+
+
 def test_destroyed_king_tower_finishes_and_freezes_the_battle() -> None:
     engine = make_engine()
     knight = engine.deploy_card(
