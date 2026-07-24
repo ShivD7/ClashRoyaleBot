@@ -124,6 +124,11 @@ ELIXIR_HIGHLIGHT_COLOR = (255, 115, 241)
 ELIXIR_DARK_COLOR = (85, 24, 105)
 ELIXIR_EMPTY_COLOR = (48, 27, 64)
 ELIXIR_FRAME_COLOR = (30, 18, 40)
+# Show a large arena announcement briefly when Elixir generation speeds up.
+# Keeping the duration as a named constant makes it easy to tune later.
+ELIXIR_MULTIPLIER_NOTICE_SECONDS = 2.5
+ELIXIR_NOTICE_PANEL_COLOR = (31, 13, 45, 225)
+ELIXIR_NOTICE_BORDER_COLOR = (245, 92, 232)
 
 # The temporary card HUD sits immediately above the Elixir bar. Keeping these
 # measurements together makes both drawing and mouse hit-testing use the same
@@ -143,6 +148,12 @@ CARD_BORDER_COLOR = (188, 198, 214)
 # This layer darkens every part of an unaffordable card, not only its border.
 CARD_DISABLED_OVERLAY_COLOR = (5, 7, 10, 145)
 DEPLOYMENT_COLOR = (59, 135, 224)
+# Spell previews use transparent fills so troops, towers, and arena tiles remain
+# visible underneath the affected area. The outline makes the exact edge clear.
+SPELL_RADIUS_VALID_FILL = (61, 170, 255, 65)
+SPELL_RADIUS_VALID_BORDER = (113, 207, 255, 220)
+SPELL_RADIUS_INVALID_FILL = (238, 66, 74, 55)
+SPELL_RADIUS_INVALID_BORDER = (255, 113, 119, 220)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +515,8 @@ class ArenaViewer:
         self.match_started_at = pygame.time.get_ticks()
         self.elixir_font = pygame.font.Font(None, 31)
         self.elixir_notice_font = pygame.font.Font(None, 25)
+        self.elixir_multiplier_font = pygame.font.Font(None, 52)
+        self.elixir_multiplier_font.set_bold(True)
         self.card_font = pygame.font.Font(None, 19)
         self.card_cost_font = pygame.font.Font(None, 23)
         self.running = True
@@ -515,6 +528,11 @@ class ArenaViewer:
         self.dragged_card_index: int | None = None
         self.drag_position: tuple[int, int] | None = None
         self.elixir = ElixirMeter()
+        # Zero means no large multiplier announcement is currently visible.
+        # The multiplier value is stored separately so the same system can also
+        # announce Triple Elixir if overtime is added later.
+        self.elixir_multiplier_notice: int | None = None
+        self.elixir_multiplier_notice_remaining = 0.0
         # Each match gets new mutable hand/queue lists from the fixed deck.
         self.card_cycle = CardCycle(DEFAULT_DECK)
         # Deployment history is useful for replay/debugging. Mutable combat
@@ -802,6 +820,41 @@ class ArenaViewer:
         self.selected_card_index = None
         self.dragged_card_index = None
         self.drag_position = None
+        # A match-ending attack can occur while the notice is active. Clear it
+        # because finished matches freeze updates and would otherwise freeze the
+        # temporary announcement on screen indefinitely.
+        self.elixir_multiplier_notice = None
+        self.elixir_multiplier_notice_remaining = 0.0
+
+    def update_elixir_multiplier_notice(self, delta_seconds: float) -> None:
+        """Start or count down the announcement for an Elixir speed change.
+
+        Comparing the multiplier before and after this frame is safer than
+        checking for an exact timestamp. A 60 FPS game will almost never land
+        on exactly 120.000 seconds, and a slow frame may jump past the boundary.
+        """
+        if delta_seconds <= 0:
+            return
+
+        # Existing notices lose the amount of time consumed by this frame.
+        self.elixir_multiplier_notice_remaining = max(
+            0.0,
+            self.elixir_multiplier_notice_remaining - delta_seconds,
+        )
+        if self.elixir_multiplier_notice_remaining == 0:
+            self.elixir_multiplier_notice = None
+
+        multiplier_before = self.elixir.multiplier_at(self.match_elapsed)
+        multiplier_after = self.elixir.multiplier_at(
+            self.match_elapsed + delta_seconds,
+        )
+
+        # A larger value means this frame crossed into Double or Triple Elixir.
+        if multiplier_after > multiplier_before:
+            self.elixir_multiplier_notice = multiplier_after
+            self.elixir_multiplier_notice_remaining = (
+                ELIXIR_MULTIPLIER_NOTICE_SECONDS
+            )
 
     def begin_card_drag(
         self,
@@ -835,6 +888,37 @@ class ArenaViewer:
 
         self.selected_tile = tile
         return self.try_play_selected_card(tile)
+
+    def dragged_spell_preview(
+        self,
+    ) -> tuple[Card, tuple[int, int], int] | None:
+        """Return the active spell and its pixel-space preview geometry.
+
+        Spell statistics store their radius in arena tiles because that is how
+        Clash Royale describes ranges. Drawing works in pixels, so this helper
+        performs the conversion in one central place:
+
+        ``pixel radius = spell tile radius * TILE_SIZE``
+
+        ``None`` means there is no spell currently being dragged over the
+        playable arena, so the drawing method has nothing to display.
+        """
+        if self.dragged_card_index is None or self.drag_position is None:
+            return None
+
+        card = self.card_cycle.hand[self.dragged_card_index]
+        if card.spell_stats is None:
+            # Troops use their normal dragged-card preview without an area circle.
+            return None
+
+        if self.screen_to_tile(self.drag_position) is None:
+            # Do not paint a damage circle over the stadium sidelines or HUD.
+            return None
+
+        # Adding 0.5 gives ordinary half-up rounding: 2.5 tiles at 25 pixels
+        # per tile becomes 63 pixels rather than Python's even-number rounding.
+        radius_pixels = int(card.spell_stats.radius * TILE_SIZE + 0.5)
+        return card, self.drag_position, radius_pixels
 
     # ------------------------------------------------------------------
     # Input
@@ -1774,6 +1858,60 @@ class ArenaViewer:
             show_affordability=False,
         )
 
+    def draw_spell_radius_preview(self) -> None:
+        """Draw the damage area beneath a spell while its card is dragged."""
+        preview = self.dragged_spell_preview()
+        if preview is None:
+            return
+
+        card, center, radius_pixels = preview
+        hovered_tile = self.screen_to_tile(center)
+        if hovered_tile is None:
+            return
+
+        # Ask the same placement validator used by the actual drop. This keeps
+        # preview color and deployment behavior synchronized if a future spell
+        # receives a restricted placement rule.
+        is_valid = self.is_valid_deployment_tile(
+            hovered_tile,
+            card,
+            self.destroyed_enemy_princess_lanes(),
+        )
+        fill_color = (
+            SPELL_RADIUS_VALID_FILL
+            if is_valid
+            else SPELL_RADIUS_INVALID_FILL
+        )
+        border_color = (
+            SPELL_RADIUS_VALID_BORDER
+            if is_valid
+            else SPELL_RADIUS_INVALID_BORDER
+        )
+
+        # Draw into an arena-sized transparent layer. Its dimensions clip the
+        # circle at arena edges so it never darkens the HUD or stadium seating.
+        radius_layer = pygame.Surface(
+            (ARENA_WIDTH, ARENA_HEIGHT),
+            pygame.SRCALPHA,
+        )
+        local_center = (center[0] - ARENA_LEFT, center[1])
+        pygame.draw.circle(
+            radius_layer,
+            fill_color,
+            local_center,
+            radius_pixels,
+        )
+        pygame.draw.circle(
+            radius_layer,
+            border_color,
+            local_center,
+            radius_pixels,
+            3,
+        )
+        # The center marker shows the exact point used when the mouse is released.
+        pygame.draw.circle(radius_layer, border_color, local_center, 4)
+        self.screen.blit(radius_layer, (ARENA_LEFT, 0))
+
     def draw_elixir_bar(self) -> None:
         """Draw the purple Elixir bar at the bottom of the screen.
 
@@ -1906,6 +2044,66 @@ class ArenaViewer:
             self.screen.blit(shadow, notice_rect.move(2, 2))
             self.screen.blit(notice, notice_rect)
 
+    def draw_elixir_multiplier_notice(self) -> None:
+        """Draw a temporary center-screen Double/Triple Elixir announcement."""
+        if (
+            self.elixir_multiplier_notice is None
+            or self.elixir_multiplier_notice_remaining <= 0
+        ):
+            return
+
+        # Fade only during the final half-second. The message stays fully legible
+        # for most of its lifetime instead of fading immediately after appearing.
+        fade_seconds = 0.5
+        alpha_fraction = min(
+            1.0,
+            self.elixir_multiplier_notice_remaining / fade_seconds,
+        )
+        panel_alpha = round(255 * alpha_fraction)
+
+        title = self.elixir_multiplier_font.render(
+            f"{self.elixir_multiplier_notice}x ELIXIR",
+            True,
+            TEXT_COLOR,
+        )
+        subtitle = self.font.render(
+            "ELIXIR GENERATION INCREASED",
+            True,
+            ELIXIR_HIGHLIGHT_COLOR,
+        )
+
+        panel = pygame.Surface((330, 92), pygame.SRCALPHA)
+        pygame.draw.rect(
+            panel,
+            (*ELIXIR_NOTICE_PANEL_COLOR[:3], min(
+                ELIXIR_NOTICE_PANEL_COLOR[3],
+                panel_alpha,
+            )),
+            panel.get_rect(),
+            border_radius=12,
+        )
+        pygame.draw.rect(
+            panel,
+            (*ELIXIR_NOTICE_BORDER_COLOR, panel_alpha),
+            panel.get_rect(),
+            4,
+            border_radius=12,
+        )
+
+        # Applying alpha to the rendered text lets the complete announcement
+        # disappear together during the last half-second.
+        title.set_alpha(panel_alpha)
+        subtitle.set_alpha(panel_alpha)
+        panel.blit(title, title.get_rect(center=(panel.get_width() // 2, 33)))
+        panel.blit(
+            subtitle,
+            subtitle.get_rect(center=(panel.get_width() // 2, 68)),
+        )
+        panel_rectangle = panel.get_rect(
+            center=(SCREEN_WIDTH // 2, ARENA_HEIGHT // 2),
+        )
+        self.screen.blit(panel, panel_rectangle)
+
     # ------------------------------------------------------------------
     # Draw frames and run the game
     # ------------------------------------------------------------------
@@ -1921,8 +2119,14 @@ class ArenaViewer:
         self.draw_units()
         self.draw_projectiles()
         self.draw_tile_highlights()
+        # Draw after combat objects so the full affected area remains readable.
+        # The HUD is drawn later and therefore stays visually above this circle.
+        self.draw_spell_radius_preview()
         self.draw_match_timer()
         self.draw_crown_scores()
+        # The temporary announcement belongs above arena action but below the
+        # draggable card, which should always remain attached to the pointer.
+        self.draw_elixir_multiplier_notice()
         self.draw_card_hand()
         self.draw_elixir_bar()
         self.draw_dragged_card()
@@ -1949,6 +2153,7 @@ class ArenaViewer:
             self.update_match_state()
             if not self.match_finished:
                 self.elixir.update(delta_seconds, self.match_elapsed)
+                self.update_elixir_multiplier_notice(delta_seconds)
                 self.battle.update(delta_seconds)
                 self.match_elapsed += delta_seconds
                 self.update_match_state()

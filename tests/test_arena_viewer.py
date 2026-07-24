@@ -8,6 +8,8 @@ from arena_viewer import (
     ARENA_RIGHT,
     ARENA_WIDTH,
     DEFAULT_DECK,
+    DOUBLE_ELIXIR_START,
+    ELIXIR_MULTIPLIER_NOTICE_SECONDS,
     ENEMY_DEPLOYMENT_UNLOCK_TOP,
     GRID_COLUMNS,
     GRID_ROWS,
@@ -245,6 +247,15 @@ def test_default_deck_has_explicit_behavior_categories() -> None:
         assert actual == expected
 
 
+def test_fireball_and_zap_have_current_damage_radii() -> None:
+    cards = {card.name: card for card in DEFAULT_DECK}
+
+    assert cards["Fireball"].spell_stats is not None
+    assert cards["Fireball"].spell_stats.radius == 2.5
+    assert cards["Zap"].spell_stats is not None
+    assert cards["Zap"].spell_stats.radius == 2.5
+
+
 def test_played_card_moves_to_back_and_next_card_fills_same_slot() -> None:
     cycle = CardCycle(DEFAULT_DECK)
     played_card = cycle.play(1)
@@ -477,6 +488,30 @@ def test_dragging_card_to_valid_tile_deploys_and_clears_drag_state() -> None:
     assert viewer.drag_position is None
 
 
+def test_dragged_spell_preview_converts_tile_radius_to_pixels() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    viewer.dragged_card_index = 3  # Fireball is the fourth starting card.
+    viewer.drag_position = (ARENA_LEFT + 200, 300)
+
+    preview = viewer.dragged_spell_preview()
+
+    assert preview is not None
+    card, center, radius_pixels = preview
+    assert card.name == "Fireball"
+    assert center == viewer.drag_position
+    assert radius_pixels == 63
+
+
+def test_dragged_troop_has_no_spell_radius_preview() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    viewer.dragged_card_index = 0  # Knight is a troop.
+    viewer.drag_position = (ARENA_LEFT + 200, 300)
+
+    assert viewer.dragged_spell_preview() is None
+
+
 def test_dragging_card_to_restricted_tile_does_not_spend_elixir() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.selected_card_index = None
@@ -548,6 +583,40 @@ def test_elixir_generation_accounts_for_rate_boundary_in_same_tick() -> None:
     meter.update(2.0, match_elapsed=119.0)
 
     assert meter.amount == pytest.approx(3 / 2.8)
+
+
+def test_crossing_double_elixir_starts_timed_notice() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.elixir = ElixirMeter()
+    viewer.match_elapsed = DOUBLE_ELIXIR_START - 0.25
+    viewer.elixir_multiplier_notice = None
+    viewer.elixir_multiplier_notice_remaining = 0.0
+
+    viewer.update_elixir_multiplier_notice(0.5)
+
+    assert viewer.elixir_multiplier_notice == 2
+    assert (
+        viewer.elixir_multiplier_notice_remaining
+        == ELIXIR_MULTIPLIER_NOTICE_SECONDS
+    )
+
+
+def test_double_elixir_notice_counts_down_without_retriggering() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.elixir = ElixirMeter()
+    viewer.match_elapsed = DOUBLE_ELIXIR_START + 1.0
+    viewer.elixir_multiplier_notice = 2
+    viewer.elixir_multiplier_notice_remaining = 1.0
+
+    viewer.update_elixir_multiplier_notice(0.25)
+
+    assert viewer.elixir_multiplier_notice == 2
+    assert viewer.elixir_multiplier_notice_remaining == pytest.approx(0.75)
+
+    viewer.update_elixir_multiplier_notice(1.0)
+
+    assert viewer.elixir_multiplier_notice is None
+    assert viewer.elixir_multiplier_notice_remaining == 0
 
 
 def test_elixir_caps_at_ten_and_does_not_bank_overflow() -> None:
