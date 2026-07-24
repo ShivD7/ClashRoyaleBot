@@ -13,6 +13,7 @@ For each frame, the game checks input, updates its data, and redraws the screen.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -24,6 +25,15 @@ from battle_engine import (
     BattleEntity,
     SpellStats,
     UnitStats,
+)
+from controllers import (
+    ControllerCard,
+    ControllerContext,
+    HumanController,
+    PlayCardAction,
+    PlayerController,
+    controller_names,
+    create_controller,
 )
 
 
@@ -339,6 +349,15 @@ class ElixirMeter:
         return True
 
 
+@dataclass
+class PlayerState:
+    """Mutable card-cycle and Elixir state independently owned by one team."""
+
+    team: str
+    card_cycle: CardCycle
+    elixir: ElixirMeter
+
+
 # These are data-only placeholder cards. Adding sprites or unit behavior later
 # will not require changing CardCycle because it only cares about card order.
 DEFAULT_DECK = (
@@ -500,7 +519,11 @@ class ArenaViewer:
     on top of parts drawn earlier.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        blue_controller: str | PlayerController = "human",
+        red_controller: str | PlayerController = "scripted",
+    ) -> None:
         """Set up Pygame and create the starting game data."""
         pygame.init()
         pygame.display.set_caption("Royale Simulator - Grid Arena")
@@ -538,14 +561,39 @@ class ArenaViewer:
         # Drag state is separate from selection so click-to-place still works.
         self.dragged_card_index: int | None = None
         self.drag_position: tuple[int, int] | None = None
-        self.elixir = ElixirMeter()
+        self.controllers = {
+            "blue": (
+                create_controller(blue_controller, "blue")
+                if isinstance(blue_controller, str)
+                else blue_controller
+            ),
+            "red": (
+                create_controller(red_controller, "red")
+                if isinstance(red_controller, str)
+                else red_controller
+            ),
+        }
+        self.local_team = next(
+            (
+                team
+                for team in ("blue", "red")
+                if isinstance(self.controllers[team], HumanController)
+            ),
+            "blue",
+        )
+        self.players = self.create_player_states()
+        self.sync_local_player_aliases()
+        self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+        pygame.display.set_caption(
+            "Royale Simulator - "
+            f"Blue: {self.controllers['blue'].name} vs "
+            f"Red: {self.controllers['red'].name}",
+        )
         # Zero means no large multiplier announcement is currently visible.
         # The multiplier value is stored separately so the same system can also
         # announce Triple Elixir if overtime is added later.
         self.elixir_multiplier_notice: int | None = None
         self.elixir_multiplier_notice_remaining = 0.0
-        # Each match gets new mutable hand/queue lists from the fixed deck.
-        self.card_cycle = CardCycle(DEFAULT_DECK)
         # Deployment history is useful for replay/debugging. Mutable combat
         # entities themselves live in BattleEngine.
         self.deployments: list[Deployment] = []
@@ -573,11 +621,39 @@ class ArenaViewer:
             ),
         )
 
+    @staticmethod
+    def create_player_states() -> dict[str, PlayerState]:
+        """Create equal independent hand, queue, and Elixir state for each side."""
+        return {
+            team: PlayerState(
+                team=team,
+                card_cycle=CardCycle(DEFAULT_DECK),
+                elixir=ElixirMeter(),
+            )
+            for team in ("blue", "red")
+        }
+
+    def sync_local_player_aliases(self) -> None:
+        """Point the existing HUD helpers at the selected local player."""
+        local_player = self.players[self.local_team]
+        self.card_cycle = local_player.card_cycle
+        self.elixir = local_player.elixir
+
     def reset_match(self, now_ms: int | None = None) -> None:
         """Reset every mutable episode value for a completely fresh rematch."""
         self.battle = self.create_battle_engine()
-        self.elixir = ElixirMeter()
-        self.card_cycle = CardCycle(DEFAULT_DECK)
+        if not hasattr(self, "controllers"):
+            self.controllers = {
+                "blue": create_controller("human", "blue"),
+                "red": create_controller("scripted", "red"),
+            }
+        if not hasattr(self, "local_team"):
+            self.local_team = "blue"
+        self.players = self.create_player_states()
+        self.sync_local_player_aliases()
+        self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+        for controller in self.controllers.values():
+            controller.reset()
         self.deployments = []
 
         self.match_started_at = (
@@ -710,6 +786,7 @@ class ArenaViewer:
         tile: tuple[int, int],
         card: Card | None = None,
         destroyed_enemy_lanes: frozenset[str] = frozenset(),
+        team: str = "blue",
     ) -> bool:
         """Check a tile against the selected card's placement behavior.
 
@@ -740,16 +817,31 @@ class ArenaViewer:
             tile_rectangle = cls.tile_rectangle(tile)
             river = cls.river_rectangle()
 
-            # Screen Y increases downward. The entire blue half remains legal.
-            if tile_rectangle.top >= river.bottom:
+            # Each side may deploy throughout its own half of the arena.
+            in_friendly_half = (
+                tile_rectangle.top >= river.bottom
+                if team == "blue"
+                else tile_rectangle.bottom <= river.top
+            )
+            if in_friendly_half:
                 return True
 
             # Water and bridge tiles are never valid troop deployment tiles.
-            if tile_rectangle.bottom > river.top:
+            intersects_river = (
+                tile_rectangle.bottom > river.top
+                and tile_rectangle.top < river.bottom
+            )
+            if intersects_river:
                 return False
 
-            # The forward deployment area reaches halfway into the enemy half.
-            if tile_rectangle.top < ENEMY_DEPLOYMENT_UNLOCK_TOP:
+            # Destroyed Princess Towers unlock a mirrored forward rectangle.
+            in_forward_depth = (
+                tile_rectangle.top >= ENEMY_DEPLOYMENT_UNLOCK_TOP
+                if team == "blue"
+                else tile_rectangle.bottom
+                <= ARENA_HEIGHT - ENEMY_DEPLOYMENT_UNLOCK_TOP
+            )
+            if not in_forward_depth:
                 return False
 
             lane = (
@@ -768,6 +860,7 @@ class ArenaViewer:
         cls,
         card: Card | None = None,
         destroyed_enemy_lanes: frozenset[str] = frozenset(),
+        team: str = "blue",
     ) -> tuple[tuple[int, int], ...]:
         """Return every grid tile rejected for a specific selected card."""
         return tuple(
@@ -778,11 +871,15 @@ class ArenaViewer:
                 (column, row),
                 card,
                 destroyed_enemy_lanes,
+                team,
             )
         )
 
-    def destroyed_enemy_princess_lanes(self) -> frozenset[str]:
-        """Return lanes whose red Princess Tower has been destroyed.
+    def destroyed_enemy_princess_lanes(
+        self,
+        team: str = "blue",
+    ) -> frozenset[str]:
+        """Return lanes whose enemy Princess Tower has been destroyed.
 
         Placement reads this directly from combat health instead of maintaining
         a second flag, so the allowed tiles update on the same frame as death.
@@ -799,7 +896,7 @@ class ArenaViewer:
             )
             for entity in battle.entities
             if (
-                entity.team == "red"
+                entity.team != team
                 and entity.tower_kind == "princess"
                 and not entity.is_alive
             )
@@ -835,33 +932,109 @@ class ArenaViewer:
         if self.selected_card_index is None:
             return False
 
-        # Read the selected card before cycling changes that hand position.
-        card = self.card_cycle.hand[self.selected_card_index]
-        # Apply troop/spell placement behavior before spending any Elixir.
+        team = getattr(self, "local_team", "blue")
+        action = PlayCardAction(self.selected_card_index, tile)
+        played = self.try_play_action(team, action)
+        if played:
+            self.selected_card_index = None
+        return played
+
+    def try_play_action(self, team: str, action: PlayCardAction) -> bool:
+        """Validate and apply one controller request through shared game rules."""
+        if getattr(self, "match_finished", False):
+            return False
+        if not 0 <= action.hand_slot < 4:
+            return False
+
+        if hasattr(self, "players"):
+            player = self.players[team]
+            card_cycle = player.card_cycle
+            elixir = player.elixir
+        else:
+            # Backward-compatible path for small isolated unit-test viewers.
+            card_cycle = self.card_cycle
+            elixir = self.elixir
+
+        card = card_cycle.hand[action.hand_slot]
         if not self.is_valid_deployment_tile(
-            tile,
+            action.tile,
             card,
-            self.destroyed_enemy_princess_lanes(),
+            self.destroyed_enemy_princess_lanes(team),
+            team,
         ):
             return False
 
-        # ElixirMeter leaves its value unchanged when the card is unaffordable.
-        if not self.elixir.spend(card.elixir_cost):
+        if not elixir.spend(card.elixir_cost):
             return False
 
-        # Everything below this point runs only after validation and payment.
-        self.deployments.append(Deployment(card, tile))
+        self.deployments.append(Deployment(card, action.tile))
         battle = getattr(self, "battle", None)
         if battle is not None:
             battle.deploy_card(
                 card,
-                "blue",
-                self.tile_rectangle(tile).center,
+                team,
+                self.tile_rectangle(action.tile).center,
             )
-        self.card_cycle.play(self.selected_card_index)
-        # Require a deliberate selection before another card can be played.
-        self.selected_card_index = None
+        card_cycle.play(action.hand_slot)
         return True
+
+    def legal_actions_for(self, team: str) -> tuple[PlayCardAction, ...]:
+        """Enumerate every card/tile action currently legal for one team."""
+        player = self.players[team]
+        destroyed_lanes = self.destroyed_enemy_princess_lanes(team)
+        actions = []
+
+        for hand_slot, card in enumerate(player.card_cycle.hand):
+            if player.elixir.amount + 1e-9 < card.elixir_cost:
+                continue
+            for row in range(GRID_ROWS):
+                for column in range(GRID_COLUMNS):
+                    tile = (column, row)
+                    if self.is_valid_deployment_tile(
+                        tile,
+                        card,
+                        destroyed_lanes,
+                        team,
+                    ):
+                        actions.append(PlayCardAction(hand_slot, tile))
+
+        return tuple(actions)
+
+    def controller_context(self, team: str) -> ControllerContext:
+        """Build the read-only snapshot supplied to a team's controller."""
+        player = self.players[team]
+        return ControllerContext(
+            team=team,
+            match_elapsed=self.match_elapsed,
+            elixir=player.elixir.amount,
+            hand=tuple(
+                ControllerCard(
+                    name=card.name,
+                    elixir_cost=card.elixir_cost,
+                    role=card.role,
+                    card_type=card.card_type,
+                )
+                for card in player.card_cycle.hand
+            ),
+            legal_actions=self.legal_actions_for(team),
+            crown_scores=self.battle.crown_scores,
+        )
+
+    def update_controllers(self, delta_seconds: float) -> None:
+        """Ask non-human controllers for actions at a bounded decision rate."""
+        decision_interval = 0.25
+        for team, controller in self.controllers.items():
+            if isinstance(controller, HumanController):
+                continue
+
+            self.controller_decision_elapsed[team] += delta_seconds
+            if self.controller_decision_elapsed[team] < decision_interval:
+                continue
+            self.controller_decision_elapsed[team] %= decision_interval
+
+            action = controller.choose_action(self.controller_context(team))
+            if action is not None:
+                self.try_play_action(team, action)
 
     def update_match_state(self, now_ms: int | None = None) -> None:
         """Advance regulation/overtime state and finish when a side wins."""
@@ -1062,7 +1235,13 @@ class ArenaViewer:
                     self.selected_card_index = None
                     self.dragged_card_index = None
                     self.drag_position = None
-                elif pygame.K_1 <= event.key <= pygame.K_4:
+                elif (
+                    isinstance(
+                        self.controllers[self.local_team],
+                        HumanController,
+                    )
+                    and pygame.K_1 <= event.key <= pygame.K_4
+                ):
                     # K_1 maps to list index 0, K_2 to index 1, and so on.
                     self.selected_card_index = event.key - pygame.K_1
                     self.dragged_card_index = None
@@ -1075,6 +1254,12 @@ class ArenaViewer:
                         logical_position,
                     ):
                         self.reset_match()
+                    continue
+
+                if not isinstance(
+                    self.controllers[self.local_team],
+                    HumanController,
+                ):
                     continue
 
                 # Check the hand before converting the click into an arena tile.
@@ -1586,7 +1771,8 @@ class ArenaViewer:
 
         for tile in self.restricted_deployment_tiles(
             selected_card,
-            self.destroyed_enemy_princess_lanes(),
+            self.destroyed_enemy_princess_lanes(self.local_team),
+            self.local_team,
         ):
             # A one-pixel inset preserves clear grid lines under the tint.
             restricted_area = self.tile_rectangle(tile).inflate(-2, -2)
@@ -2033,7 +2219,8 @@ class ArenaViewer:
         is_valid = self.is_valid_deployment_tile(
             hovered_tile,
             card,
-            self.destroyed_enemy_princess_lanes(),
+            self.destroyed_enemy_princess_lanes(self.local_team),
+            self.local_team,
         )
         fill_color = (
             SPELL_RADIUS_VALID_FILL
@@ -2363,8 +2550,10 @@ class ArenaViewer:
             # but combat, Elixir generation, and the match clock are frozen.
             self.update_match_state()
             if not self.match_finished:
-                self.elixir.update(delta_seconds, self.match_elapsed)
+                for player in self.players.values():
+                    player.elixir.update(delta_seconds, self.match_elapsed)
                 self.update_elixir_multiplier_notice(delta_seconds)
+                self.update_controllers(delta_seconds)
                 self.battle.update(delta_seconds)
                 self.match_elapsed += delta_seconds
                 self.update_match_state()
@@ -2374,9 +2563,33 @@ class ArenaViewer:
         pygame.quit()
 
 
-def main() -> None:
-    """Create and start the game."""
-    ArenaViewer().run()
+def parse_controller_arguments(
+    arguments: list[str] | None = None,
+) -> argparse.Namespace:
+    """Parse controller choices without coupling them to match logic."""
+    parser = argparse.ArgumentParser(description="Run the Royale simulator")
+    parser.add_argument(
+        "--blue-controller",
+        choices=controller_names(),
+        default="human",
+        help="decision maker for the blue team (default: human)",
+    )
+    parser.add_argument(
+        "--red-controller",
+        choices=controller_names(),
+        default="scripted",
+        help="decision maker for the red team (default: scripted)",
+    )
+    return parser.parse_args(arguments)
+
+
+def main(arguments: list[str] | None = None) -> None:
+    """Create controllers from command-line configuration and start the game."""
+    settings = parse_controller_arguments(arguments)
+    ArenaViewer(
+        blue_controller=settings.blue_controller,
+        red_controller=settings.red_controller,
+    ).run()
 
 
 # Start the game only when this file is run directly.
