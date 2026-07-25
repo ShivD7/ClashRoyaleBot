@@ -96,6 +96,8 @@ FIXED_TIMESTEP_MS = 50
 FIXED_TIMESTEP_SECONDS = FIXED_TIMESTEP_MS / 1000
 MATCH_DURATION_SECONDS = 3 * 60
 OVERTIME_DURATION_SECONDS = 2 * 60
+FIREBALL_TRAVEL_SECONDS = 0.65
+FIREBALL_IMPACT_SECONDS = 0.32
 
 # All colors are kept here so they are easy to find and change.
 ARENA_COLOR = (74, 145, 82)
@@ -321,6 +323,43 @@ class Deployment:
 
     card: Card
     tile: tuple[int, int]
+
+
+@dataclass
+class FireballAnimation:
+    """Store one visual-only Fireball flight and impact animation."""
+
+    team: str
+    start: tuple[float, float]
+    target: tuple[float, float]
+    elapsed: float = 0.0
+
+    @property
+    def total_seconds(self) -> float:
+        """Return the complete flight plus impact lifetime."""
+        return FIREBALL_TRAVEL_SECONDS + FIREBALL_IMPACT_SECONDS
+
+    @property
+    def is_traveling(self) -> bool:
+        """Return whether the fireball has not reached its target yet."""
+        return self.elapsed < FIREBALL_TRAVEL_SECONDS
+
+    @property
+    def travel_progress(self) -> float:
+        """Return flight progress clamped between zero and one."""
+        return max(0.0, min(1.0, self.elapsed / FIREBALL_TRAVEL_SECONDS))
+
+    def position_at(self, progress: float | None = None) -> pygame.Vector2:
+        """Return a point along the flight with a raised parabolic arc."""
+        if progress is None:
+            progress = self.travel_progress
+        progress = max(0.0, min(1.0, progress))
+        start = pygame.Vector2(self.start)
+        target = pygame.Vector2(self.target)
+        position = start.lerp(target, progress)
+        # Four times p(1-p) starts and ends at zero and peaks at one halfway.
+        position.y -= 70.0 * 4.0 * progress * (1.0 - progress)
+        return position
 
 
 @dataclass
@@ -1225,6 +1264,9 @@ class ArenaViewer:
         # Deployment history is useful for replay/debugging. Mutable combat
         # entities themselves live in BattleEngine.
         self.deployments: list[Deployment] = []
+        # Spell animations are visual only. BattleEngine still resolves spell
+        # damage immediately so animation frame rate cannot change gameplay.
+        self.fireball_animations: list[FireballAnimation] = []
         self.battle = self.create_battle_engine()
         self.fixed_timestep = FixedTimestepClock()
         self.match_elapsed = 0.0
@@ -1299,6 +1341,7 @@ class ArenaViewer:
             controller.reset()
         self.fixed_timestep = FixedTimestepClock()
         self.deployments = []
+        self.fireball_animations = []
 
         self.match_started_at = (
             pygame.time.get_ticks()
@@ -1767,6 +1810,8 @@ class ArenaViewer:
             return False
 
         self.deployments.append(Deployment(card, action.tile))
+        if card.name == "Fireball":
+            self.queue_fireball_animation(team, action.tile)
         battle = getattr(self, "battle", None)
         if battle is not None:
             battle.deploy_card(
@@ -1776,6 +1821,40 @@ class ArenaViewer:
             )
         card_cycle.play(action.hand_slot)
         return True
+
+    def queue_fireball_animation(
+        self,
+        team: str,
+        tile: tuple[int, int],
+    ) -> None:
+        """Launch a visual Fireball from behind the caster's King Tower."""
+        if team not in {"blue", "red"}:
+            raise ValueError("Team must be 'blue' or 'red'")
+        if not hasattr(self, "fireball_animations"):
+            self.fireball_animations = []
+
+        start_y = ARENA_HEIGHT + 38 if team == "blue" else -38
+        target = self.tile_rectangle(tile).center
+        self.fireball_animations.append(
+            FireballAnimation(
+                team=team,
+                start=(CENTER_LANE_X, start_y),
+                target=(float(target[0]), float(target[1])),
+            ),
+        )
+
+    def update_fireball_animations(self, delta_seconds: float) -> None:
+        """Advance and remove visual Fireball animations using frame time."""
+        if delta_seconds <= 0:
+            return
+        animations = getattr(self, "fireball_animations", [])
+        for animation in animations:
+            animation.elapsed += delta_seconds
+        self.fireball_animations = [
+            animation
+            for animation in animations
+            if animation.elapsed < animation.total_seconds
+        ]
 
     def legal_actions_for(self, team: str) -> tuple[PlayCardAction, ...]:
         """Enumerate every card/tile action currently legal for one team."""
@@ -3152,6 +3231,106 @@ class ArenaViewer:
                 border_radius=2,
             )
 
+    def draw_fireball_animations(self) -> None:
+        """Draw Fireball targets, arcing projectiles, trails, and impacts."""
+        for animation in getattr(self, "fireball_animations", []):
+            target = (round(animation.target[0]), round(animation.target[1]))
+
+            if animation.is_traveling:
+                # The target ring makes the selected destination clear before
+                # the projectile arrives, without covering the units inside it.
+                marker = pygame.Surface((50, 50), pygame.SRCALPHA)
+                marker_center = (25, 25)
+                marker_alpha = 115 + int(45 * math.sin(animation.elapsed * 18))
+                pygame.draw.circle(
+                    marker,
+                    (255, 126, 39, marker_alpha),
+                    marker_center,
+                    20,
+                    3,
+                )
+                pygame.draw.circle(
+                    marker,
+                    (255, 220, 92, marker_alpha),
+                    marker_center,
+                    5,
+                    2,
+                )
+                self.screen.blit(marker, (target[0] - 25, target[1] - 25))
+
+                # Earlier points on the same curve form a deterministic flame
+                # trail. No random particles are needed, so replays look stable.
+                progress = animation.travel_progress
+                for trail_index in range(5, 0, -1):
+                    trail_progress = max(0.0, progress - trail_index * 0.045)
+                    trail_position = animation.position_at(trail_progress)
+                    trail_radius = 2 + (5 - trail_index)
+                    trail_color = (
+                        (188, 48, 24)
+                        if trail_index >= 4
+                        else (246, 107, 31)
+                    )
+                    pygame.draw.circle(
+                        self.screen,
+                        trail_color,
+                        (round(trail_position.x), round(trail_position.y)),
+                        trail_radius,
+                    )
+
+                position = animation.position_at()
+                center = (round(position.x), round(position.y))
+                glow = pygame.Surface((42, 42), pygame.SRCALPHA)
+                pygame.draw.circle(glow, (255, 87, 28, 75), (21, 21), 20)
+                pygame.draw.circle(glow, (239, 67, 25, 255), (21, 21), 13)
+                pygame.draw.circle(glow, (255, 155, 42, 255), (18, 18), 8)
+                pygame.draw.circle(glow, (255, 239, 148, 255), (16, 16), 4)
+                self.screen.blit(glow, (center[0] - 21, center[1] - 21))
+                continue
+
+            impact_progress = min(
+                1.0,
+                (animation.elapsed - FIREBALL_TRAVEL_SECONDS)
+                / FIREBALL_IMPACT_SECONDS,
+            )
+            radius = round(12 + impact_progress * 48)
+            alpha = max(0, round(220 * (1.0 - impact_progress)))
+            impact_size = radius * 2 + 12
+            impact = pygame.Surface((impact_size, impact_size), pygame.SRCALPHA)
+            impact_center = (impact_size // 2, impact_size // 2)
+            pygame.draw.circle(
+                impact,
+                (222, 55, 22, alpha // 2),
+                impact_center,
+                radius,
+            )
+            pygame.draw.circle(
+                impact,
+                (255, 155, 39, alpha),
+                impact_center,
+                max(3, round(radius * 0.65)),
+                4,
+            )
+            for ray_index in range(8):
+                angle = math.tau * ray_index / 8
+                ray_distance = radius + 4
+                ray_center = (
+                    round(impact_center[0] + math.cos(angle) * ray_distance),
+                    round(impact_center[1] + math.sin(angle) * ray_distance),
+                )
+                pygame.draw.circle(
+                    impact,
+                    (255, 209, 80, alpha),
+                    ray_center,
+                    max(2, round(5 * (1.0 - impact_progress))),
+                )
+            self.screen.blit(
+                impact,
+                (
+                    target[0] - impact_center[0],
+                    target[1] - impact_center[1],
+                ),
+            )
+
     def draw_stun_effects(self) -> None:
         """Draw a pulsing aura and electrical bolts on stunned entities."""
         pulse_size = 3 if (pygame.time.get_ticks() // 100) % 2 else 0
@@ -4085,6 +4264,7 @@ class ArenaViewer:
         self.draw_units()
         self.draw_stun_effects()
         self.draw_projectiles()
+        self.draw_fireball_animations()
         self.draw_tile_highlights()
         # Draw after combat objects so the full affected area remains readable.
         # The HUD is drawn later and therefore stays visually above this circle.
@@ -4116,6 +4296,9 @@ class ArenaViewer:
         while self.running:
             frame_ms = self.clock.tick(FPS)
             self.handle_events()
+
+            if self.screen_state == "battle":
+                self.update_fireball_animations(frame_ms / 1000)
 
             if self.screen_state == "home":
                 # Time on the menu must not build up into battle updates.

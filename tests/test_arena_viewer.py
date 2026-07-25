@@ -19,6 +19,8 @@ from arena_viewer import (
     DOUBLE_ELIXIR_START,
     ELIXIR_MULTIPLIER_NOTICE_SECONDS,
     ENEMY_DEPLOYMENT_UNLOCK_TOP,
+    FIREBALL_IMPACT_SECONDS,
+    FIREBALL_TRAVEL_SECONDS,
     FIXED_TIMESTEP_MS,
     FIXED_TIMESTEP_SECONDS,
     GRID_COLUMNS,
@@ -35,6 +37,7 @@ from arena_viewer import (
     CardCycle,
     ElixirMeter,
     FixedTimestepClock,
+    FireballAnimation,
     PlacementRule,
     RIVER_TOP,
     RIVER_HEIGHT,
@@ -736,6 +739,9 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     viewer.elixir_multiplier_notice_remaining = 1.0
     viewer.overtime_notice_remaining = 1.0
     viewer.tiebreaker_notice_remaining = 1.0
+    viewer.fireball_animations = [
+        FireballAnimation("blue", (295, 838), (195, 138)),
+    ]
 
     viewer.reset_match(now_ms=999_000)
 
@@ -764,6 +770,7 @@ def test_play_again_resets_every_mutable_match_value() -> None:
     assert viewer.elixir_multiplier_notice_remaining == 0
     assert viewer.overtime_notice_remaining == 0
     assert viewer.tiebreaker_notice_remaining == 0
+    assert viewer.fireball_animations == []
 
 
 def test_fireball_can_be_deployed_in_enemy_territory() -> None:
@@ -778,6 +785,46 @@ def test_fireball_can_be_deployed_in_enemy_territory() -> None:
     assert viewer.elixir.amount == 0
     assert viewer.deployments[0].card.name == "Fireball"
     assert viewer.deployments[0].tile == enemy_tile
+    assert len(viewer.fireball_animations) == 1
+    animation = viewer.fireball_animations[0]
+    assert animation.team == "blue"
+    assert animation.start[1] > ARENA_HEIGHT
+    assert animation.target == tuple(
+        float(value)
+        for value in ArenaViewer.tile_rectangle(enemy_tile).center
+    )
+
+
+def test_fireball_animation_follows_an_arc_and_ends_at_its_target() -> None:
+    animation = FireballAnimation(
+        team="blue",
+        start=(295.0, 838.0),
+        target=(195.0, 138.0),
+    )
+
+    assert animation.position_at(0) == animation.start
+    assert animation.position_at(1) == animation.target
+
+    midpoint = animation.position_at(0.5)
+    straight_midpoint_y = (animation.start[1] + animation.target[1]) / 2
+    assert midpoint.y < straight_midpoint_y
+
+
+def test_finished_fireball_animation_is_removed_after_impact() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    animation = FireballAnimation(
+        team="red",
+        start=(295.0, -38.0),
+        target=(395.0, 638.0),
+    )
+    viewer.fireball_animations = [animation]
+
+    viewer.update_fireball_animations(FIREBALL_TRAVEL_SECONDS)
+    assert not animation.is_traveling
+    assert viewer.fireball_animations == [animation]
+
+    viewer.update_fireball_animations(FIREBALL_IMPACT_SECONDS)
+    assert viewer.fireball_animations == []
 
 
 def test_restricted_tiles_match_deployment_validation() -> None:
