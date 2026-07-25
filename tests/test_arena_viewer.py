@@ -1145,18 +1145,24 @@ def test_elixir_can_only_be_spent_when_affordable() -> None:
     assert meter.amount == pytest.approx(0.5)
 
 
-def test_home_screen_has_eight_deck_slots_and_every_collection_card() -> None:
+def test_home_screen_shows_only_cards_that_are_not_in_the_deck() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_deck = list(DEFAULT_DECK)
     deck_slots = ArenaViewer.home_deck_slot_rectangles()
-    collection_cards = ArenaViewer.home_collection_card_rectangles()
+    available_cards = viewer.available_collection_cards()
+    collection_rectangles = viewer.home_collection_card_rectangles()
 
     assert len(deck_slots) == 8
-    assert len(collection_cards) == len(CARD_CATALOG)
+    assert len(available_cards) == len(CARD_CATALOG) - 8
+    assert len(collection_rectangles) == len(available_cards)
+    assert set(available_cards).isdisjoint(viewer.selected_deck)
     assert all(not left.colliderect(right) for left, right in zip(deck_slots, deck_slots[1:]))
 
 
 def test_collection_card_replaces_a_deck_slot_without_changing_deck_size() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.selected_deck = list(DEFAULT_DECK)
+    removed_card = viewer.selected_deck[0]
     new_card = next(card for card in CARD_CATALOG if card.name == "Mini P.E.K.K.A")
 
     viewer.replace_deck_slot(0, new_card)
@@ -1164,6 +1170,8 @@ def test_collection_card_replaces_a_deck_slot_without_changing_deck_size() -> No
     assert viewer.selected_deck[0] == new_card
     assert len(viewer.selected_deck) == 8
     assert len(set(viewer.selected_deck)) == 8
+    assert new_card not in viewer.available_collection_cards()
+    assert removed_card in viewer.available_collection_cards()
 
 
 def test_dropping_an_existing_deck_card_swaps_slots() -> None:

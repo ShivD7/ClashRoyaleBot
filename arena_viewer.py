@@ -1302,12 +1302,18 @@ class ArenaViewer:
             for column in range(4)
         )
 
-    @staticmethod
-    def home_collection_card_rectangles() -> tuple[pygame.Rect, ...]:
-        """Return one compact card rectangle for every catalog entry."""
+    def available_collection_cards(self) -> tuple[Card, ...]:
+        """Return only cards that are not already in the current deck."""
+        selected_cards = set(self.selected_deck)
+        return tuple(
+            card for card in CARD_CATALOG if card not in selected_cards
+        )
+
+    def home_collection_card_rectangles(self) -> tuple[pygame.Rect, ...]:
+        """Return one compact rectangle for every available card."""
         return tuple(
             pygame.Rect(39 + (index % 5) * 103, 371 + (index // 5) * 76, 94, 66)
-            for index in range(len(CARD_CATALOG))
+            for index in range(len(self.available_collection_cards()))
         )
 
     def replace_deck_slot(self, slot_index: int, card: Card) -> None:
@@ -2057,9 +2063,7 @@ class ArenaViewer:
                 self.start_match()
                 return
 
-            for index, card_rectangle in enumerate(
-                self.home_collection_card_rectangles(),
-            ):
+            for index, card_rectangle in enumerate(self.home_collection_card_rectangles()):
                 if card_rectangle.collidepoint(position):
                     self.home_dragged_card_index = index
                     self.home_drag_position = position
@@ -2076,13 +2080,14 @@ class ArenaViewer:
                 return
 
             position = self.display_to_logical_position(event.pos)
+            available_cards = self.available_collection_cards()
             for slot_index, slot_rectangle in enumerate(
                 self.home_deck_slot_rectangles(),
             ):
                 if slot_rectangle.collidepoint(position):
                     self.replace_deck_slot(
                         slot_index,
-                        CARD_CATALOG[self.home_dragged_card_index],
+                        available_cards[self.home_dragged_card_index],
                     )
                     break
             self.home_dragged_card_index = None
@@ -2336,13 +2341,15 @@ class ArenaViewer:
             collection_heading,
             collection_heading.get_rect(center=(295, 346)),
         )
-        selected_cards = set(self.selected_deck)
         for index, (card, rectangle) in enumerate(
-            zip(CARD_CATALOG, self.home_collection_card_rectangles()),
+            zip(
+                self.available_collection_cards(),
+                self.home_collection_card_rectangles(),
+            ),
         ):
             if index == self.home_dragged_card_index:
                 continue
-            self.draw_home_card(card, rectangle, selected=card in selected_cards)
+            self.draw_home_card(card, rectangle)
 
         play_button = self.home_play_button_rectangle()
         pygame.draw.rect(
@@ -2369,7 +2376,7 @@ class ArenaViewer:
             drag_rectangle = pygame.Rect(0, 0, 94, 66)
             drag_rectangle.center = self.home_drag_position
             self.draw_home_card(
-                CARD_CATALOG[self.home_dragged_card_index],
+                self.available_collection_cards()[self.home_dragged_card_index],
                 drag_rectangle,
                 dragging=True,
             )
