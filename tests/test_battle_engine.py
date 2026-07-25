@@ -868,6 +868,83 @@ def test_princess_tower_fires_locked_projectile_at_nearest_troop() -> None:
     assert knight.health == starting_health - red_left_princess.damage
 
 
+def test_skeleton_army_spawns_fifteen_units_in_scatter_formation() -> None:
+    engine = make_engine()
+
+    army = engine.deploy_card(
+        card_named("Skeleton Army"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )
+    positions = {
+        (round(skeleton.position.x, 4), round(skeleton.position.y, 4))
+        for skeleton in army
+    }
+
+    assert len(army) == 15
+    assert len(positions) == 15
+    assert len({position[1] for position in positions}) == 3
+
+
+def test_wizard_projectile_splashes_clustered_skeleton_army() -> None:
+    engine = make_engine()
+    for tower in engine.entities:
+        tower.damage = 0
+    wizard = engine.deploy_card(
+        card_named("Wizard"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    army = engine.deploy_card(
+        card_named("Skeleton Army"),
+        "red",
+        (LEFT_LANE_X, 400),
+    )
+    wizard.movement_speed = 0
+    for skeleton in army:
+        skeleton.movement_speed = 0
+
+    engine.update(0.01)
+    engine.update(0.5)
+
+    assert not any(skeleton.is_alive for skeleton in army)
+
+
+def test_wizard_splash_uses_impact_radius_without_hitting_distant_enemy() -> None:
+    engine = make_engine()
+    for tower in engine.entities:
+        tower.damage = 0
+    wizard = engine.deploy_card(
+        card_named("Wizard"),
+        "blue",
+        (100, 500),
+    )[0]
+    primary = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (200, 500),
+    )[0]
+    nearby = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (244, 500),
+    )[0]
+    distant = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (280, 500),
+    )[0]
+    for entity in (wizard, primary, nearby, distant):
+        entity.movement_speed = 0
+
+    engine.update(0.01)
+    engine.update(0.5)
+
+    assert primary.health == primary.max_health - wizard.damage
+    assert nearby.health == nearby.max_health - wizard.damage
+    assert distant.health == distant.max_health
+
+
 def test_king_tower_activates_after_allied_princess_tower_dies() -> None:
     engine = make_engine()
     red_king = next(

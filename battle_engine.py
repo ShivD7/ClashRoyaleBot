@@ -33,6 +33,7 @@ class UnitStats:
     movement_speed: float
     attack_range: float
     projectile_speed: float = 0.0
+    attack_splash_radius: float = 0.0
     sight_range: float = 5.5
     body_radius: float = 9.0
     mass: float = 1.0
@@ -81,6 +82,7 @@ class BattleEntity:
     attack_range: float
     sight_range: float
     projectile_speed: float
+    attack_splash_radius: float
     target_priority: str
     target_types: str
     movement_type: str
@@ -136,6 +138,8 @@ class Projectile:
     position: pygame.Vector2
     damage: int
     speed: float
+    splash_radius: float
+    target_types: str
     color: tuple[int, int, int]
 
 
@@ -302,6 +306,7 @@ class BattleEngine:
             attack_range=self.KING_RANGE if is_king else self.PRINCESS_RANGE,
             sight_range=self.KING_RANGE if is_king else self.PRINCESS_RANGE,
             projectile_speed=self.TOWER_PROJECTILE_SPEED,
+            attack_splash_radius=0.0,
             target_priority="nearest_enemy",
             target_types="air_and_ground",
             movement_type="ground",
@@ -362,14 +367,45 @@ class BattleEngine:
     ) -> tuple[pygame.Vector2, ...]:
         """Return every body center produced by one card deployment."""
         spacing = min(12.0, self.tile_size * 0.4)
-        middle = (card.unit_count - 1) / 2
         return tuple(
             pygame.Vector2(
-                position[0] + (index - middle) * spacing,
-                position[1],
+                position[0] + offset.x,
+                position[1] + offset.y,
             )
-            for index in range(card.unit_count)
+            for offset in self._deployment_offsets(card.unit_count, spacing)
         )
+
+    @staticmethod
+    def _deployment_offsets(
+        unit_count: int,
+        spacing: float,
+    ) -> tuple[pygame.Vector2, ...]:
+        """Lay small groups in a line and large swarms in a compact scatter."""
+        if unit_count <= 3:
+            middle = (unit_count - 1) / 2
+            return tuple(
+                pygame.Vector2((index - middle) * spacing, 0)
+                for index in range(unit_count)
+            )
+
+        # Skeleton Army deploys all 15 bodies simultaneously in a scatter
+        # formation. A staggered five-by-three group stays centered on the
+        # selected tile without initially overlapping individual hitboxes.
+        columns = min(5, unit_count)
+        rows = (unit_count + columns - 1) // columns
+        offsets = []
+        for index in range(unit_count):
+            row, column = divmod(index, columns)
+            row_count = min(columns, unit_count - row * columns)
+            row_middle = (row_count - 1) / 2
+            stagger = spacing * 0.5 if row % 2 else 0.0
+            offsets.append(
+                pygame.Vector2(
+                    (column - row_middle) * spacing + stagger,
+                    (row - (rows - 1) / 2) * spacing,
+                )
+            )
+        return tuple(offsets)
 
     def can_deploy_card(
         self,
@@ -455,6 +491,7 @@ class BattleEngine:
             attack_range=stats.attack_range,
             sight_range=stats.sight_range,
             projectile_speed=stats.projectile_speed,
+            attack_splash_radius=stats.attack_splash_radius,
             target_priority=card.target_priority,
             target_types=card.target_types,
             movement_type=card.movement_type,
@@ -1262,6 +1299,15 @@ class BattleEngine:
         attacker.attack_cooldown = attacker.hit_speed
         if attacker.projectile_speed > 0 or attacker.attack_style == "ranged":
             self._create_projectile(attacker, target)
+        elif attacker.attack_splash_radius > 0:
+            self._deal_attack_damage(
+                team=attacker.team,
+                target_types=attacker.target_types,
+                damage=attacker.damage,
+                splash_radius=attacker.attack_splash_radius,
+                primary_target=target,
+                impact_position=target.position,
+            )
         else:
             target.take_damage(attacker.damage)
 
@@ -1270,7 +1316,12 @@ class BattleEngine:
         attacker: BattleEntity,
         target: BattleEntity,
     ) -> None:
-        color = (245, 222, 115) if attacker.is_building else (218, 234, 255)
+        if attacker.name == "Wizard":
+            color = (255, 133, 51)
+        elif attacker.is_building:
+            color = (245, 222, 115)
+        else:
+            color = (218, 234, 255)
         speed_tiles = (
             attacker.projectile_speed
             if attacker.projectile_speed > 0
@@ -1285,6 +1336,8 @@ class BattleEngine:
                 position=attacker.position.copy(),
                 damage=attacker.damage,
                 speed=speed_tiles * self.tile_size,
+                splash_radius=attacker.attack_splash_radius,
+                target_types=attacker.target_types,
                 color=color,
             )
         )
@@ -1303,7 +1356,7 @@ class BattleEngine:
             step = projectile.speed * delta_seconds
 
             if distance <= step + target.radius:
-                target.take_damage(projectile.damage)
+                self._resolve_projectile_impact(projectile, target.position)
                 if self.winning_team is not None:
                     break
                 continue
@@ -1313,6 +1366,55 @@ class BattleEngine:
             survivors.append(projectile)
 
         self.projectiles = survivors
+
+    def _resolve_projectile_impact(
+        self,
+        projectile: Projectile,
+        impact_position: pygame.Vector2,
+    ) -> None:
+        """Damage the locked target or every valid enemy in a splash impact."""
+        primary = self.entity_by_id(projectile.target_id)
+        if primary is None:
+            return
+        self._deal_attack_damage(
+            team=projectile.team,
+            target_types=projectile.target_types,
+            damage=projectile.damage,
+            splash_radius=projectile.splash_radius,
+            primary_target=primary,
+            impact_position=impact_position,
+        )
+
+    def _deal_attack_damage(
+        self,
+        *,
+        team: str,
+        target_types: str,
+        damage: int,
+        splash_radius: float,
+        primary_target: BattleEntity,
+        impact_position: pygame.Vector2,
+    ) -> None:
+        """Resolve single-target or circular troop damage at one impact point."""
+        if splash_radius <= 0:
+            primary_target.take_damage(damage)
+            return
+
+        radius_pixels = splash_radius * self.tile_size
+        for candidate in self.living_entities:
+            if candidate.team == team:
+                continue
+            if (
+                target_types == "ground"
+                and candidate.movement_type == "air"
+            ):
+                continue
+            if (
+                impact_position.distance_to(candidate.position)
+                > radius_pixels + candidate.radius
+            ):
+                continue
+            candidate.take_damage(damage)
 
     def _activate_king_towers(self) -> None:
         """Wake each King Tower after either allied Princess Tower dies.
