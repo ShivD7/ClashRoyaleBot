@@ -34,6 +34,9 @@ class UnitStats:
     attack_range: float
     projectile_speed: float = 0.0
     attack_splash_radius: float = 0.0
+    inferno_damage_stages: tuple[int, int, int] | None = None
+    freeze_duration: float = 0.0
+    self_destructs_on_attack: bool = False
     sight_range: float = 5.5
     body_radius: float = 9.0
     mass: float = 1.0
@@ -108,6 +111,9 @@ class BattleEntity:
     sight_range: float
     projectile_speed: float
     attack_splash_radius: float
+    inferno_damage_stages: tuple[int, int, int] | None
+    freeze_duration: float
+    self_destructs_on_attack: bool
     target_priority: str
     target_types: str
     movement_type: str
@@ -130,6 +136,8 @@ class BattleEntity:
     lifetime_elapsed: float = 0.0
     spawner: SpawnerStats | None = None
     spawn_cooldown: float = 0.0
+    target_lock_elapsed: float = 0.0
+    freeze_remaining: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -168,6 +176,8 @@ class Projectile:
     splash_radius: float
     target_types: str
     color: tuple[int, int, int]
+    freeze_duration: float = 0.0
+    visual_style: str = "shot"
 
 
 class BattleEngine:
@@ -334,6 +344,9 @@ class BattleEngine:
             sight_range=self.KING_RANGE if is_king else self.PRINCESS_RANGE,
             projectile_speed=self.TOWER_PROJECTILE_SPEED,
             attack_splash_radius=0.0,
+            inferno_damage_stages=None,
+            freeze_duration=0.0,
+            self_destructs_on_attack=False,
             target_priority="nearest_enemy",
             target_types="air_and_ground",
             movement_type="ground",
@@ -511,6 +524,13 @@ class BattleEngine:
                 raise ValueError("Spawner interval must be positive")
             if stats.spawner.initial_delay_seconds < 0:
                 raise ValueError("Spawner initial delay cannot be negative")
+        if stats.freeze_duration < 0:
+            raise ValueError("Freeze duration cannot be negative")
+        if stats.inferno_damage_stages is not None:
+            if stats.hit_speed <= 0 or any(
+                damage <= 0 for damage in stats.inferno_damage_stages
+            ):
+                raise ValueError("Inferno damage stages must be positive")
 
         suffix = f" {index + 1}" if card.unit_count > 1 else ""
         entity = BattleEntity(
@@ -528,6 +548,9 @@ class BattleEngine:
             sight_range=stats.sight_range,
             projectile_speed=stats.projectile_speed,
             attack_splash_radius=stats.attack_splash_radius,
+            inferno_damage_stages=stats.inferno_damage_stages,
+            freeze_duration=stats.freeze_duration,
+            self_destructs_on_attack=stats.self_destructs_on_attack,
             target_priority=card.target_priority,
             target_types=card.target_types,
             movement_type=card.movement_type,
@@ -638,13 +661,23 @@ class BattleEngine:
                 continue
 
             entity.velocity.update(0, 0)
+            active_delta = delta_seconds
+            if entity.freeze_remaining > 0:
+                frozen_time = min(active_delta, entity.freeze_remaining)
+                entity.freeze_remaining -= frozen_time
+                active_delta -= frozen_time
+                entity.target_lock_elapsed = 0.0
+                entity.state = EntityState.RETARGETING
+                if active_delta <= 1e-9:
+                    continue
+
             entity.attack_cooldown = max(
                 0.0,
-                entity.attack_cooldown - delta_seconds,
+                entity.attack_cooldown - active_delta,
             )
 
             if entity.knockback_remaining > 0 and not entity.is_building:
-                forced_time = min(delta_seconds, entity.knockback_remaining)
+                forced_time = min(active_delta, entity.knockback_remaining)
                 movement_displacements[entity.entity_id] = (
                     entity.knockback_velocity * forced_time
                 )
@@ -660,6 +693,7 @@ class BattleEngine:
 
             if target is None or not target.is_alive:
                 entity.target_id = None
+                entity.target_lock_elapsed = 0.0
                 entity.state = EntityState.RETARGETING
                 target = self._acquire_target(entity)
                 if target is not None:
@@ -681,22 +715,29 @@ class BattleEngine:
 
             if self._is_in_attack_range(entity, target):
                 entity.state = EntityState.ATTACKING
-                self._attack_if_ready(entity, target)
+                self._attack_if_ready(entity, target, active_delta)
                 if self.winning_team is not None:
                     break
             elif entity.is_building:
-                # Towers cannot move and keep their lock while the target lives.
-                entity.state = EntityState.ATTACKING
+                if entity.inferno_damage_stages is not None:
+                    # An Inferno beam must remain physically connected. Leaving
+                    # range breaks the lock and resets its damage ramp.
+                    entity.target_id = None
+                    entity.target_lock_elapsed = 0.0
+                    entity.state = EntityState.RETARGETING
+                else:
+                    # Other towers keep their target while it remains alive.
+                    entity.state = EntityState.ATTACKING
             else:
                 entity.state = EntityState.MOVING
                 velocity = self._desired_velocity(
                     entity,
                     target,
-                    delta_seconds,
+                    active_delta,
                 )
                 entity.velocity = velocity
                 movement_displacements[entity.entity_id] = (
-                    velocity * delta_seconds
+                    velocity * active_delta
                 )
 
         if self.winning_team is None:
@@ -1372,12 +1413,18 @@ class BattleEngine:
         self,
         attacker: BattleEntity,
         target: BattleEntity,
+        delta_seconds: float,
     ) -> None:
+        if attacker.inferno_damage_stages is not None:
+            self._apply_inferno_beam(attacker, target, delta_seconds)
+            return
         if attacker.attack_cooldown > 0:
             return
 
         attacker.attack_cooldown = attacker.hit_speed
-        if attacker.projectile_speed > 0 or attacker.attack_style == "ranged":
+        if attacker.self_destructs_on_attack:
+            self._create_spirit_leap(attacker, target)
+        elif attacker.projectile_speed > 0 or attacker.attack_style == "ranged":
             self._create_projectile(attacker, target)
         elif attacker.attack_splash_radius > 0:
             self._deal_attack_damage(
@@ -1390,6 +1437,61 @@ class BattleEngine:
             )
         else:
             target.take_damage(attacker.damage)
+
+    def _apply_inferno_beam(
+        self,
+        attacker: BattleEntity,
+        target: BattleEntity,
+        delta_seconds: float,
+    ) -> None:
+        """Continuously drain one locked target through three damage stages."""
+        stages = attacker.inferno_damage_stages
+        if stages is None or delta_seconds <= 0:
+            return
+
+        remaining = delta_seconds
+        while remaining > 1e-9 and target.is_alive:
+            elapsed = attacker.target_lock_elapsed
+            if elapsed < 2.0:
+                stage_index = 0
+                stage_remaining = 2.0 - elapsed
+            elif elapsed < 4.0:
+                stage_index = 1
+                stage_remaining = 4.0 - elapsed
+            else:
+                stage_index = 2
+                stage_remaining = remaining
+
+            step = min(remaining, stage_remaining)
+            damage_per_second = stages[stage_index] / attacker.hit_speed
+            target.take_damage(damage_per_second * step)
+            attacker.target_lock_elapsed += step
+            remaining -= step
+
+    def _create_spirit_leap(
+        self,
+        attacker: BattleEntity,
+        target: BattleEntity,
+    ) -> None:
+        """Launch a spirit's body at its target and consume it on takeoff."""
+        self.projectiles.append(
+            Projectile(
+                projectile_id=self._next_projectile_id,
+                source_id=attacker.entity_id,
+                target_id=target.entity_id,
+                team=attacker.team,
+                position=attacker.position.copy(),
+                damage=attacker.damage,
+                speed=12.0 * self.tile_size,
+                splash_radius=attacker.attack_splash_radius,
+                target_types=attacker.target_types,
+                color=(126, 229, 255),
+                freeze_duration=attacker.freeze_duration,
+                visual_style="ice_spirit",
+            )
+        )
+        self._next_projectile_id += 1
+        attacker.take_damage(attacker.health)
 
     def _create_projectile(
         self,
@@ -1456,7 +1558,7 @@ class BattleEngine:
         primary = self.entity_by_id(projectile.target_id)
         if primary is None:
             return
-        self._deal_attack_damage(
+        affected = self._deal_attack_damage(
             team=projectile.team,
             target_types=projectile.target_types,
             damage=projectile.damage,
@@ -1464,6 +1566,13 @@ class BattleEngine:
             primary_target=primary,
             impact_position=impact_position,
         )
+        if projectile.freeze_duration > 0:
+            for target in affected:
+                if target.is_alive:
+                    self.apply_freeze(
+                        target.entity_id,
+                        projectile.freeze_duration,
+                    )
 
     def _deal_attack_damage(
         self,
@@ -1474,13 +1583,14 @@ class BattleEngine:
         splash_radius: float,
         primary_target: BattleEntity,
         impact_position: pygame.Vector2,
-    ) -> None:
+    ) -> tuple[BattleEntity, ...]:
         """Resolve single-target or circular troop damage at one impact point."""
         if splash_radius <= 0:
             primary_target.take_damage(damage)
-            return
+            return (primary_target,)
 
         radius_pixels = splash_radius * self.tile_size
+        affected = []
         for candidate in self.living_entities:
             if candidate.team == team:
                 continue
@@ -1495,6 +1605,21 @@ class BattleEngine:
             ):
                 continue
             candidate.take_damage(damage)
+            affected.append(candidate)
+        return tuple(affected)
+
+    def apply_freeze(self, entity_id: int, duration: float) -> bool:
+        """Freeze a living target and reset any escalating Inferno lock."""
+        if duration <= 0:
+            raise ValueError("Freeze duration must be positive")
+        entity = self.entity_by_id(entity_id)
+        if entity is None or not entity.is_alive:
+            return False
+
+        entity.freeze_remaining = max(entity.freeze_remaining, duration)
+        entity.target_lock_elapsed = 0.0
+        entity.state = EntityState.RETARGETING
+        return True
 
     def _activate_king_towers(self) -> None:
         """Wake each King Tower after either allied Princess Tower dies.
