@@ -450,7 +450,46 @@ def test_buildings_cannot_be_deployed_on_bridges(team: str) -> None:
     assert not ArenaViewer.is_valid_deployment_tile(
         bridge_tile,
         cards["Cannon"],
+        frozenset({"left"}),
         team=team,
+    )
+
+
+@pytest.mark.parametrize("team", ("blue", "red"))
+def test_destroyed_princess_tower_unlocks_only_its_bridge_for_troops(
+    team: str,
+) -> None:
+    cards = {card.name: card for card in DEFAULT_DECK}
+    left_bridge_tile = ArenaViewer.screen_to_tile(
+        ArenaViewer.bridge_rectangles()[0].center,
+    )
+    right_bridge_tile = ArenaViewer.screen_to_tile(
+        ArenaViewer.bridge_rectangles()[1].center,
+    )
+    water_tile = (
+        GRID_COLUMNS // 2,
+        RIVER_TOP // TILE_SIZE,
+    )
+
+    assert left_bridge_tile is not None
+    assert right_bridge_tile is not None
+    assert ArenaViewer.is_valid_deployment_tile(
+        left_bridge_tile,
+        cards["Knight"],
+        frozenset({"left"}),
+        team,
+    )
+    assert not ArenaViewer.is_valid_deployment_tile(
+        right_bridge_tile,
+        cards["Knight"],
+        frozenset({"left"}),
+        team,
+    )
+    assert not ArenaViewer.is_valid_deployment_tile(
+        water_tile,
+        cards["Knight"],
+        frozenset({"left", "right"}),
+        team,
     )
 
 
@@ -587,13 +626,13 @@ def test_live_destroyed_tower_immediately_updates_ground_card_placement() -> Non
         )
     )
     red_left_princess.take_damage(red_left_princess.max_health)
-    unlocked_left_tile = (
-        GRID_COLUMNS // 4,
-        ENEMY_DEPLOYMENT_UNLOCK_TOP // TILE_SIZE,
+    unlocked_left_bridge_tile = ArenaViewer.screen_to_tile(
+        ArenaViewer.bridge_rectangles()[0].center,
     )
 
+    assert unlocked_left_bridge_tile is not None
     assert viewer.destroyed_enemy_princess_lanes() == frozenset({"left"})
-    assert viewer.try_play_selected_card(unlocked_left_tile)
+    assert viewer.try_play_selected_card(unlocked_left_bridge_tile)
 
 
 def test_king_tower_winner_finishes_viewer_and_clears_card_interaction() -> None:

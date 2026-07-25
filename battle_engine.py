@@ -122,6 +122,7 @@ class BattleEntity:
     target_id: int | None = None
     attack_cooldown: float = 0.0
     lane_x: float | None = None
+    bridge_committed: bool = False
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_remaining: float = 0.0
@@ -882,6 +883,10 @@ class BattleEngine:
         if entity.lane_x is None:
             entity.lane_x = self._select_bridge(entity, target)
         bridge_x = entity.lane_x
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        if abs(entity.position.x - bridge_x) <= usable_half_width + 1e-6:
+            entity.bridge_committed = True
 
         if moving_up:
             entry = pygame.Vector2(
@@ -1212,12 +1217,21 @@ class BattleEngine:
         if entity.movement_type == "air":
             return
 
-        if self._is_in_bridge_corridor(entity):
+        overlaps_river = (
+            entity.position.y + entity.radius > self.river_top
+            and entity.position.y - entity.radius < self.river_bottom
+        )
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        if (
+            self._is_in_bridge_corridor(entity)
+            or (overlaps_river and entity.bridge_committed)
+        ):
             # Keep a committed troop's whole circular body on the bridge or its
             # approach. This prevents collision resolution from side-stepping a
-            # queued unit into water and leaving it trapped at the bank.
-            half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
-            usable_half_width = max(0.0, half_width - entity.radius)
+            # queued unit into water and leaving it trapped at the bank. Using
+            # the remembered alignment also preserves that commitment when a
+            # collision pushes the troop beyond the edge before it enters.
             entity.position.x = min(
                 entity.lane_x + usable_half_width,
                 max(
@@ -1245,10 +1259,6 @@ class BattleEngine:
             )
             return
 
-        overlaps_river = (
-            entity.position.y + entity.radius > self.river_top
-            and entity.position.y - entity.radius < self.river_bottom
-        )
         if not overlaps_river:
             return
 
@@ -1297,13 +1307,20 @@ class BattleEngine:
         )
 
     def _is_in_bridge_corridor(self, entity: BattleEntity) -> bool:
-        """Return whether a ground troop's body currently overlaps the river."""
+        """Return whether a ground troop is already aligned with its bridge."""
         if entity.movement_type != "ground" or entity.lane_x is None:
             return False
-        return (
+        overlaps_river = (
             entity.position.y + entity.radius > self.river_top
             and entity.position.y - entity.radius < self.river_bottom
         )
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        is_horizontally_supported = (
+            abs(entity.position.x - entity.lane_x)
+            <= usable_half_width + 1e-6
+        )
+        return overlaps_river and is_horizontally_supported
 
     @staticmethod
     def _can_slide_past(

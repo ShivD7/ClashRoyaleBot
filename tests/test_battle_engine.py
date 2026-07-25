@@ -468,6 +468,38 @@ def test_fast_unit_moves_farther_than_slow_unit_in_same_time() -> None:
     assert mini_pekka_start.distance_to(mini_pekka.position) == pytest.approx(37.5)
 
 
+@pytest.mark.parametrize(
+    ("team", "start_tile"),
+    (
+        ("blue", (0, 17)),
+        ("red", (0, 14)),
+    ),
+)
+def test_hog_rider_at_far_left_approaches_bridge_without_teleporting(
+    team: str,
+    start_tile: tuple[int, int],
+) -> None:
+    engine = make_engine()
+    hog = engine.deploy_card(
+        card_named("Hog Rider"),
+        team,
+        ArenaViewer.tile_rectangle(start_tile).center,
+    )[0]
+    timestep = 0.05
+    starting_x = hog.position.x
+
+    for _ in range(20):
+        previous_position = hog.position.copy()
+        engine.update(timestep)
+
+        assert previous_position.distance_to(hog.position) <= (
+            hog.movement_speed * timestep + 1e-6
+        )
+
+    assert hog.lane_x == LEFT_LANE_X
+    assert abs(hog.position.x - hog.lane_x) < abs(starting_x - hog.lane_x)
+
+
 def test_overlapping_ground_units_are_separated_by_body_radius() -> None:
     engine = make_engine()
     first = engine.deploy_card(

@@ -1445,6 +1445,22 @@ class ArenaViewer:
         )
 
     @classmethod
+    def bridge_lane_for_tile(
+        cls,
+        tile: tuple[int, int],
+    ) -> str | None:
+        """Return the lane when a tile's center lies on a bridge."""
+        center = cls.tile_rectangle(tile).center
+        for lane, bridge in zip(
+            ("left", "right"),
+            cls.bridge_rectangles(),
+            strict=True,
+        ):
+            if bridge.collidepoint(center):
+                return lane
+        return None
+
+    @classmethod
     def is_valid_deployment_tile(
         cls,
         tile: tuple[int, int],
@@ -1490,15 +1506,21 @@ class ArenaViewer:
             if in_friendly_half:
                 return True
 
-            # Bridges are movement paths, not deployment zones. Reject every
-            # unit card in the river rows so spawned bodies always begin on
-            # open grass. Spells returned above remain targetable everywhere.
+            # Before a Princess Tower falls, bridges are movement paths rather
+            # than deployment zones. Destroying that lane's enemy Princess
+            # Tower unlocks its bridge for troop cards only. Buildings still
+            # require grass, and open water always remains unavailable.
             intersects_river = (
                 tile_rectangle.bottom > river.top
                 and tile_rectangle.top < river.bottom
             )
             if intersects_river:
-                return False
+                bridge_lane = cls.bridge_lane_for_tile(tile)
+                return (
+                    card is not None
+                    and card.card_type == "troop"
+                    and bridge_lane in destroyed_enemy_lanes
+                )
 
             # Destroyed Princess Towers unlock a mirrored forward rectangle.
             in_forward_depth = (
