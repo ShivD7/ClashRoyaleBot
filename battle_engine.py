@@ -59,6 +59,7 @@ class UnitStats:
     # Troops use ``None``. Deployed buildings must provide a positive lifetime.
     lifetime_seconds: float | None = None
     spawner: SpawnerStats | None = None
+    can_jump_river: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,12 @@ class BattleEntity:
     target_id: int | None = None
     attack_cooldown: float = 0.0
     lane_x: float | None = None
+    bridge_committed: bool = False
+    can_jump_river: bool = False
+    jump_origin: pygame.Vector2 | None = None
+    jump_destination: pygame.Vector2 | None = None
+    jump_elapsed: float = 0.0
+    jump_duration: float = 0.0
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_remaining: float = 0.0
@@ -153,6 +160,18 @@ class BattleEntity:
     def is_alive(self) -> bool:
         """Return whether this entity can move, attack, or be targeted."""
         return self.state is not EntityState.DEAD and self.health > 0
+
+    @property
+    def is_jumping(self) -> bool:
+        """Return whether this troop is currently airborne over the river."""
+        return self.jump_destination is not None
+
+    @property
+    def jump_progress(self) -> float:
+        """Return normalized progress for rendering the jump arc."""
+        if not self.is_jumping or self.jump_duration <= 0:
+            return 0.0
+        return min(1.0, self.jump_elapsed / self.jump_duration)
 
     def take_damage(self, amount: float) -> None:
         """Apply damage once and enter the permanent dead state at zero health."""
@@ -577,6 +596,7 @@ class BattleEngine:
                 if card.card_type == "building"
                 else stats.knockback_resistance
             ),
+            can_jump_river=stats.can_jump_river,
             is_building=card.card_type == "building",
             lifetime_seconds=(
                 stats.lifetime_seconds
@@ -692,6 +712,10 @@ class BattleEngine:
                 entity.attack_cooldown - delta_seconds,
             )
 
+            if entity.is_jumping:
+                self._advance_river_jump(entity, delta_seconds)
+                continue
+
             if entity.knockback_remaining > 0 and not entity.is_building:
                 forced_time = min(delta_seconds, entity.knockback_remaining)
                 movement_displacements[entity.entity_id] = (
@@ -707,7 +731,11 @@ class BattleEngine:
 
             target = self.entity_by_id(entity.target_id)
 
-            if target is None or not target.is_alive:
+            if (
+                target is None
+                or not target.is_alive
+                or not self._is_eligible_target(entity, target)
+            ):
                 entity.target_id = None
                 entity.state = EntityState.RETARGETING
                 target = self._acquire_target(entity)
@@ -726,6 +754,10 @@ class BattleEngine:
                     entity.target_id = target.entity_id
 
             if target is None:
+                continue
+
+            if self._try_start_river_jump(entity, target):
+                self._advance_river_jump(entity, delta_seconds)
                 continue
 
             if self._is_in_attack_range(entity, target):
@@ -870,7 +902,9 @@ class BattleEngine:
         # Crown Towers defend only against troops, not other buildings.
         if entity.is_building and candidate.is_building:
             return False
-        if entity.target_types == "ground" and candidate.movement_type == "air":
+        if entity.target_types == "ground" and (
+            candidate.movement_type == "air" or candidate.is_jumping
+        ):
             return False
         return True
 
@@ -911,6 +945,98 @@ class BattleEngine:
         allowed += attacker.radius + target.radius
         return distance <= allowed
 
+    def _try_start_river_jump(
+        self,
+        entity: BattleEntity,
+        target: BattleEntity,
+    ) -> bool:
+        """Start the Hog Rider shortcut from an outer river-edge tile."""
+        if (
+            not entity.can_jump_river
+            or entity.is_jumping
+            or entity.movement_type != "ground"
+        ):
+            return False
+
+        moving_up = entity.team == "blue"
+        target_across_river = (
+            target.position.y < self.river_top
+            if moving_up
+            else target.position.y >= self.river_bottom
+        )
+        if not target_across_river:
+            return False
+
+        entry_y = (
+            self.river_bottom + entity.radius
+            if moving_up
+            else self.river_top - entity.radius
+        )
+        if abs(entity.position.y - entry_y) > self.tile_size * 0.6:
+            return False
+
+        on_left_edge = (
+            entity.position.x
+            < self.arena_left + self.tile_size
+        )
+        on_right_edge = (
+            entity.position.x
+            > self.arena_right - self.tile_size
+        )
+        if not on_left_edge and not on_right_edge:
+            return False
+
+        diagonal_x = self.tile_size if on_left_edge else -self.tile_size
+        landing_y = (
+            self.river_top - entity.radius
+            if moving_up
+            else self.river_bottom + entity.radius
+        )
+        destination = pygame.Vector2(
+            entity.position.x + diagonal_x,
+            landing_y,
+        )
+        distance = entity.position.distance_to(destination)
+        entity.jump_origin = entity.position.copy()
+        entity.jump_destination = destination
+        entity.jump_elapsed = 0.0
+        entity.jump_duration = distance / max(entity.movement_speed, 1e-6)
+        entity.lane_x = None
+        entity.bridge_committed = False
+        entity.state = EntityState.MOVING
+        return True
+
+    @staticmethod
+    def _advance_river_jump(
+        entity: BattleEntity,
+        delta_seconds: float,
+    ) -> None:
+        """Advance an active jump at the troop's ordinary movement speed."""
+        origin = entity.jump_origin
+        destination = entity.jump_destination
+        if origin is None or destination is None:
+            return
+
+        entity.jump_elapsed = min(
+            entity.jump_duration,
+            entity.jump_elapsed + delta_seconds,
+        )
+        progress = entity.jump_progress
+        previous_position = entity.position.copy()
+        entity.position = origin.lerp(destination, progress)
+        if delta_seconds > 0:
+            entity.velocity = (
+                entity.position - previous_position
+            ) / delta_seconds
+        entity.state = EntityState.MOVING
+
+        if progress >= 1.0:
+            entity.position = destination.copy()
+            entity.jump_origin = None
+            entity.jump_destination = None
+            entity.jump_elapsed = 0.0
+            entity.jump_duration = 0.0
+
     def _movement_destination(
         self,
         entity: BattleEntity,
@@ -938,6 +1064,10 @@ class BattleEngine:
         if entity.lane_x is None:
             entity.lane_x = self._select_bridge(entity, target)
         bridge_x = entity.lane_x
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        if abs(entity.position.x - bridge_x) <= usable_half_width + 1e-6:
+            entity.bridge_committed = True
 
         if moving_up:
             entry = pygame.Vector2(
@@ -1143,6 +1273,8 @@ class BattleEngine:
         second: BattleEntity,
     ) -> bool:
         """Return whether two bodies physically collide while moving."""
+        if first.is_jumping or second.is_jumping:
+            return False
         if first.movement_type == "air" or second.movement_type == "air":
             return (
                 first.movement_type == "air"
@@ -1272,15 +1404,26 @@ class BattleEngine:
             self.screen_height - entity.radius,
             max(entity.radius, entity.position.y),
         )
+        if entity.is_jumping:
+            return
         if entity.movement_type == "air":
             return
 
-        if self._is_in_bridge_corridor(entity):
+        overlaps_river = (
+            entity.position.y + entity.radius > self.river_top
+            and entity.position.y - entity.radius < self.river_bottom
+        )
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        if (
+            self._is_in_bridge_corridor(entity)
+            or (overlaps_river and entity.bridge_committed)
+        ):
             # Keep a committed troop's whole circular body on the bridge or its
             # approach. This prevents collision resolution from side-stepping a
-            # queued unit into water and leaving it trapped at the bank.
-            half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
-            usable_half_width = max(0.0, half_width - entity.radius)
+            # queued unit into water and leaving it trapped at the bank. Using
+            # the remembered alignment also preserves that commitment when a
+            # collision pushes the troop beyond the edge before it enters.
             entity.position.x = min(
                 entity.lane_x + usable_half_width,
                 max(
@@ -1308,10 +1451,6 @@ class BattleEngine:
             )
             return
 
-        overlaps_river = (
-            entity.position.y + entity.radius > self.river_top
-            and entity.position.y - entity.radius < self.river_bottom
-        )
         if not overlaps_river:
             return
 
@@ -1360,13 +1499,20 @@ class BattleEngine:
         )
 
     def _is_in_bridge_corridor(self, entity: BattleEntity) -> bool:
-        """Return whether a ground troop's body currently overlaps the river."""
+        """Return whether a ground troop is already aligned with its bridge."""
         if entity.movement_type != "ground" or entity.lane_x is None:
             return False
-        return (
+        overlaps_river = (
             entity.position.y + entity.radius > self.river_top
             and entity.position.y - entity.radius < self.river_bottom
         )
+        half_width = self.BRIDGE_HALF_WIDTH_TILES * self.tile_size
+        usable_half_width = max(0.0, half_width - entity.radius)
+        is_horizontally_supported = (
+            abs(entity.position.x - entity.lane_x)
+            <= usable_half_width + 1e-6
+        )
+        return overlaps_river and is_horizontally_supported
 
     @staticmethod
     def _can_slide_past(
@@ -1546,6 +1692,8 @@ class BattleEngine:
         impact_position: pygame.Vector2,
     ) -> None:
         """Resolve single-target or circular troop damage at one impact point."""
+        if target_types == "ground" and primary_target.is_jumping:
+            return
         if splash_radius <= 0:
             primary_target.take_damage(damage)
             return
@@ -1556,7 +1704,10 @@ class BattleEngine:
                 continue
             if (
                 target_types == "ground"
-                and candidate.movement_type == "air"
+                and (
+                    candidate.movement_type == "air"
+                    or candidate.is_jumping
+                )
             ):
                 continue
             if (

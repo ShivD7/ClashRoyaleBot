@@ -744,6 +744,7 @@ CARD_CATALOG = (
             body_radius=10.0,
             mass=2.5,
             knockback_resistance=0.2,
+            can_jump_river=True,
         ),
         None,
     ),
@@ -1491,6 +1492,22 @@ class ArenaViewer:
         )
 
     @classmethod
+    def bridge_lane_for_tile(
+        cls,
+        tile: tuple[int, int],
+    ) -> str | None:
+        """Return the lane when a tile's center lies on a bridge."""
+        center = cls.tile_rectangle(tile).center
+        for lane, bridge in zip(
+            ("left", "right"),
+            cls.bridge_rectangles(),
+            strict=True,
+        ):
+            if bridge.collidepoint(center):
+                return lane
+        return None
+
+    @classmethod
     def is_valid_deployment_tile(
         cls,
         tile: tuple[int, int],
@@ -1536,15 +1553,21 @@ class ArenaViewer:
             if in_friendly_half:
                 return True
 
-            # Bridges are movement paths, not deployment zones. Reject every
-            # unit card in the river rows so spawned bodies always begin on
-            # open grass. Spells returned above remain targetable everywhere.
+            # Before a Princess Tower falls, bridges are movement paths rather
+            # than deployment zones. Destroying that lane's enemy Princess
+            # Tower unlocks its bridge for troop cards only. Buildings still
+            # require grass, and open water always remains unavailable.
             intersects_river = (
                 tile_rectangle.bottom > river.top
                 and tile_rectangle.top < river.bottom
             )
             if intersects_river:
-                return False
+                bridge_lane = cls.bridge_lane_for_tile(tile)
+                return (
+                    card is not None
+                    and card.card_type == "troop"
+                    and bridge_lane in destroyed_enemy_lanes
+                )
 
             # Destroyed Princess Towers unlock a mirrored forward rectangle.
             in_forward_depth = (
@@ -2818,14 +2841,20 @@ class ArenaViewer:
         entity: BattleEntity,
         *,
         width: int = 34,
+        center: tuple[int, int] | None = None,
     ) -> None:
         """Draw a compact health bar immediately above one living entity."""
         if not entity.is_alive:
             return
 
         height = 5
-        center_x = round(entity.position.x)
-        top = round(entity.position.y - entity.radius - 12)
+        if center is None:
+            center = (
+                round(entity.position.x),
+                round(entity.position.y),
+            )
+        center_x = center[0]
+        top = round(center[1] - entity.radius - 12)
         background = pygame.Rect(center_x - width // 2, top, width, height)
         ratio = max(0.0, min(1.0, entity.health / entity.max_health))
         remaining_width = round((width - 2) * ratio)
@@ -2866,6 +2895,7 @@ class ArenaViewer:
             "Skeletons": (226, 224, 211),
             "Skeleton Army": (226, 224, 211),
             "Minions": (111, 105, 202),
+            "Hog Rider": (166, 104, 67),
         }
 
         for entity in self.battle.entities:
@@ -2875,7 +2905,19 @@ class ArenaViewer:
             base_name = entity.name.rsplit(" ", 1)[0]
             if base_name not in unit_colors:
                 base_name = entity.name
-            center = (round(entity.position.x), round(entity.position.y))
+            ground_center = (
+                round(entity.position.x),
+                round(entity.position.y),
+            )
+            center = ground_center
+            if entity.is_jumping:
+                arc_height = round(
+                    math.sin(math.pi * entity.jump_progress) * TILE_SIZE,
+                )
+                center = (ground_center[0], ground_center[1] - arc_height)
+                shadow = pygame.Rect(0, 0, 22, 8)
+                shadow.center = ground_center
+                pygame.draw.ellipse(self.screen, (55, 65, 55), shadow)
             team_outline = (
                 BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
             )
@@ -2911,7 +2953,7 @@ class ArenaViewer:
             )[:2]
             label = self.card_font.render(initials, True, TOWER_OPENING_COLOR)
             self.screen.blit(label, label.get_rect(center=center))
-            self.draw_health_bar(entity)
+            self.draw_health_bar(entity, center=center)
 
     def draw_deployed_buildings(self) -> None:
         """Draw player-deployed buildings separately from permanent towers."""
