@@ -181,6 +181,97 @@ def test_crown_towers_do_not_lose_health_over_time() -> None:
     } == starting_health
 
 
+@pytest.mark.parametrize(
+    "card_name",
+    ("Knight", "Minions", "Cannon"),
+)
+def test_units_and_buildings_cannot_spawn_inside_crown_tower(
+    card_name: str,
+) -> None:
+    engine = make_engine()
+    blue_princess = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "blue" and entity.tower_kind == "princess"
+    )
+
+    assert not engine.can_deploy_card(
+        card_named(card_name),
+        blue_princess.position,
+    )
+    assert engine.can_deploy_card(
+        card_named("Fireball"),
+        blue_princess.position,
+    )
+
+
+def test_every_body_in_multi_unit_formation_must_clear_building() -> None:
+    engine = make_engine()
+    red_princess = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "princess"
+    )
+    # The formation center clears the tower, but the left Archer spawns five
+    # pixels closer and would overlap its physical footprint.
+    placement = (
+        red_princess.position.x + red_princess.radius + 11,
+        red_princess.position.y,
+    )
+
+    assert not engine.can_deploy_card(card_named("Archers"), placement)
+
+
+def test_building_cannot_stack_on_building_or_ground_troop() -> None:
+    engine = make_engine()
+    cannon = card_named("Cannon")
+    open_position = (300, 500)
+
+    assert engine.can_deploy_card(cannon, open_position)
+    engine.deploy_card(cannon, "blue", open_position)
+    assert not engine.can_deploy_card(cannon, open_position)
+
+    troop_position = (400, 500)
+    engine.deploy_card(card_named("Knight"), "blue", troop_position)
+    assert not engine.can_deploy_card(cannon, troop_position)
+
+
+def test_troops_may_share_spawn_area_and_movement_resolves_overlap() -> None:
+    engine = make_engine()
+    position = (300, 500)
+    engine.deploy_card(card_named("Knight"), "blue", position)
+
+    assert engine.can_deploy_card(card_named("Skeletons"), position)
+
+
+def test_destroyed_building_no_longer_blocks_placement() -> None:
+    engine = make_engine()
+    red_princess = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red" and entity.tower_kind == "princess"
+    )
+    red_princess.take_damage(red_princess.max_health)
+
+    assert engine.can_deploy_card(
+        card_named("Knight"),
+        red_princess.position,
+    )
+
+
+def test_spawn_footprint_must_fit_completely_inside_arena() -> None:
+    engine = make_engine()
+    giant = card_named("Giant")
+    radius = giant.unit_stats.body_radius
+
+    assert not engine.can_deploy_card(
+        giant,
+        (engine.arena_left + radius - 0.1, 500),
+    )
+    assert engine.can_deploy_card(
+        giant,
+        (engine.arena_left + radius, 500),
+    )
 def test_flying_units_cross_the_river_without_using_a_bridge() -> None:
     engine = make_engine()
     minion = engine.deploy_card(
