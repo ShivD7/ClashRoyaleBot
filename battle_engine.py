@@ -38,6 +38,7 @@ class EntityState(Enum):
     RETARGETING = "retargeting"
     MOVING = "moving"
     ATTACKING = "attacking"
+    STUNNED = "stunned"
     DEAD = "dead"
 
 
@@ -64,12 +65,13 @@ class UnitStats:
 
 @dataclass(frozen=True)
 class SpellStats:
-    """Level-11 direct spell damage and affected radius."""
+    """Level-11 spell damage, affected radius, and optional status effects."""
 
     damage: int
     crown_tower_damage: int
     radius: float
     knockback_distance: float = 0.0
+    stun_duration: float = 0.0
 
 
 class CardLike(Protocol):
@@ -150,6 +152,8 @@ class BattleEntity:
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_remaining: float = 0.0
+    # A stunned entity stays targetable but cannot move or begin an attack.
+    stun_remaining: float = 0.0
     # Only deployed buildings use these fields. Crown Towers never expire.
     lifetime_seconds: float | None = None
     lifetime_elapsed: float = 0.0
@@ -634,6 +638,8 @@ class BattleEngine:
         stats = card.spell_stats
         if stats is None:
             raise ValueError(f"Spell card {card.name} has no spell statistics")
+        if stats.stun_duration < 0:
+            raise ValueError("Spell stun duration cannot be negative")
 
         center = pygame.Vector2(position)
         radius_pixels = stats.radius * self.tile_size
@@ -650,6 +656,8 @@ class BattleEngine:
                 else stats.damage
             )
             target.take_damage(damage)
+            if stats.stun_duration > 0 and target.is_alive:
+                self.apply_stun(target.entity_id, stats.stun_duration)
             if stats.knockback_distance > 0 and target.is_alive:
                 self.apply_knockback(
                     target.entity_id,
@@ -707,9 +715,24 @@ class BattleEngine:
                 continue
 
             entity.velocity.update(0, 0)
+            active_time = delta_seconds
+            if entity.stun_remaining > 0:
+                stunned_time = min(active_time, entity.stun_remaining)
+                entity.stun_remaining = max(
+                    0.0,
+                    entity.stun_remaining - stunned_time,
+                )
+                active_time -= stunned_time
+                entity.state = EntityState.STUNNED
+                if active_time <= 1e-9:
+                    continue
+                # A long update can contain the end of a stun. Use only the
+                # unstunned part of that update for movement and cooldowns.
+                entity.state = EntityState.RETARGETING
+
             entity.attack_cooldown = max(
                 0.0,
-                entity.attack_cooldown - delta_seconds,
+                entity.attack_cooldown - active_time,
             )
 
             if entity.is_jumping:
@@ -717,7 +740,7 @@ class BattleEngine:
                 continue
 
             if entity.knockback_remaining > 0 and not entity.is_building:
-                forced_time = min(delta_seconds, entity.knockback_remaining)
+                forced_time = min(active_time, entity.knockback_remaining)
                 movement_displacements[entity.entity_id] = (
                     entity.knockback_velocity * forced_time
                 )
@@ -773,11 +796,11 @@ class BattleEngine:
                 velocity = self._desired_velocity(
                     entity,
                     target,
-                    delta_seconds,
+                    active_time,
                 )
                 entity.velocity = velocity
                 movement_displacements[entity.entity_id] = (
-                    velocity * delta_seconds
+                    velocity * active_time
                 )
 
         if self.winning_team is None:
@@ -1575,6 +1598,26 @@ class BattleEngine:
         entity.knockback_remaining = duration
         entity.target_id = None
         entity.state = EntityState.RETARGETING
+        return True
+
+    def apply_stun(self, entity_id: int, duration: float) -> bool:
+        """Stop a living enemy from moving or attacking for a set duration."""
+        if duration < 0:
+            raise ValueError("Stun duration cannot be negative")
+        if duration == 0:
+            return False
+
+        entity = self.entity_by_id(entity_id)
+        if entity is None or not entity.is_alive:
+            return False
+
+        # Reapplying a shorter stun must not shorten one already in progress.
+        entity.stun_remaining = max(entity.stun_remaining, duration)
+        # Reset the current attack timing. Once the stun ends, the entity waits
+        # through its normal hit speed before it can produce another attack.
+        entity.attack_cooldown = max(entity.attack_cooldown, entity.hit_speed)
+        entity.velocity.update(0, 0)
+        entity.state = EntityState.STUNNED
         return True
 
     # ------------------------------------------------------------------

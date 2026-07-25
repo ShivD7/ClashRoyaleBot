@@ -1358,11 +1358,96 @@ def test_fireball_knocks_surviving_troop_away_from_blast() -> None:
     assert knight.position.y == pytest.approx(starting_position.y)
 
 
+def test_zap_stuns_only_enemies_in_its_radius_for_half_a_second() -> None:
+    engine = make_engine()
+    red_knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 500),
+    )[0]
+    blue_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X + 65, 500),
+    )[0]
+    outside_knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (RIGHT_LANE_X, 500),
+    )[0]
+    starting_position = red_knight.position.copy()
+
+    engine.deploy_card(
+        card_named("Zap"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )
+
+    assert red_knight.stun_remaining == pytest.approx(0.5)
+    assert blue_knight.stun_remaining == 0
+    assert outside_knight.stun_remaining == 0
+
+    engine.update(0.25)
+    assert red_knight.position == starting_position
+    assert red_knight.stun_remaining == pytest.approx(0.25)
+
+    engine.update(0.25)
+    assert red_knight.position == starting_position
+    assert red_knight.stun_remaining == 0
+
+    engine.update(0.05)
+    assert red_knight.position != starting_position
+
+
+def test_zap_stops_and_resets_a_crown_tower_attack() -> None:
+    engine = make_engine()
+    red_princess = next(
+        entity
+        for entity in engine.entities
+        if entity.team == "red"
+        and entity.tower_kind == "princess"
+        and entity.position.x == LEFT_LANE_X
+    )
+    engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, red_princess.position.y + 50),
+    )
+
+    engine.deploy_card(
+        card_named("Zap"),
+        "blue",
+        (round(red_princess.position.x), round(red_princess.position.y)),
+    )
+
+    assert red_princess.stun_remaining == pytest.approx(0.5)
+    assert red_princess.attack_cooldown == red_princess.hit_speed
+
+    engine.update(0.5)
+    assert not any(
+        projectile.source_id == red_princess.entity_id
+        for projectile in engine.projectiles
+    )
+
+    engine.update(red_princess.hit_speed - 0.01)
+    assert not any(
+        projectile.source_id == red_princess.entity_id
+        for projectile in engine.projectiles
+    )
+
+    engine.update(0.02)
+    assert any(
+        projectile.source_id == red_princess.entity_id
+        for projectile in engine.projectiles
+    )
+
+
 def test_every_catalog_card_has_complete_combat_stats() -> None:
     for card in CARD_CATALOG:
         if card.spell_stats is not None:
             assert card.spell_stats.damage > 0
             assert card.spell_stats.radius > 0
+            assert card.spell_stats.stun_duration >= 0
         else:
             assert card.unit_stats is not None
             assert card.unit_stats.max_health > 0
