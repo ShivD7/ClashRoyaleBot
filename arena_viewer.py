@@ -1082,6 +1082,54 @@ class ArenaViewer:
         }
         return frozenset(destroyed_lanes)
 
+    def is_valid_live_deployment(
+        self,
+        tile: tuple[int, int],
+        card: Card,
+        team: str,
+        destroyed_enemy_lanes: frozenset[str] | None = None,
+    ) -> bool:
+        """Check terrain rules and current entity footprints for one card."""
+        if destroyed_enemy_lanes is None:
+            destroyed_enemy_lanes = self.destroyed_enemy_princess_lanes(team)
+        if not self.is_valid_deployment_tile(
+            tile,
+            card,
+            destroyed_enemy_lanes,
+            team,
+        ):
+            return False
+
+        battle = getattr(self, "battle", None)
+        if battle is None:
+            return True
+        can_deploy_card = getattr(battle, "can_deploy_card", None)
+        if can_deploy_card is None:
+            return True
+        return can_deploy_card(
+            card,
+            self.tile_rectangle(tile).center,
+        )
+
+    def live_restricted_deployment_tiles(
+        self,
+        card: Card,
+        team: str,
+    ) -> tuple[tuple[int, int], ...]:
+        """Return terrain- or collision-blocked tiles in the current battle."""
+        destroyed_lanes = self.destroyed_enemy_princess_lanes(team)
+        return tuple(
+            (column, row)
+            for row in range(GRID_ROWS)
+            for column in range(GRID_COLUMNS)
+            if not self.is_valid_live_deployment(
+                (column, row),
+                card,
+                team,
+                destroyed_lanes,
+            )
+        )
+
     @staticmethod
     def hand_card_rectangles() -> tuple[pygame.Rect, ...]:
         """Return the four card rectangles shared by drawing and mouse input."""
@@ -1141,10 +1189,9 @@ class ArenaViewer:
             elixir = self.elixir
 
         card = card_cycle.hand[action.hand_slot]
-        if not self.is_valid_deployment_tile(
+        if not self.is_valid_live_deployment(
             action.tile,
             card,
-            self.destroyed_enemy_princess_lanes(team),
             team,
         ):
             return False
@@ -1178,11 +1225,11 @@ class ArenaViewer:
             for row in range(GRID_ROWS):
                 for column in range(GRID_COLUMNS):
                     tile = (column, row)
-                    if self.is_valid_deployment_tile(
+                    if self.is_valid_live_deployment(
                         tile,
                         card,
-                        destroyed_lanes,
                         team,
+                        destroyed_lanes,
                     ):
                         actions.append(PlayCardAction(hand_slot, tile))
 
@@ -2128,9 +2175,8 @@ class ArenaViewer:
             pygame.SRCALPHA,
         )
 
-        for tile in self.restricted_deployment_tiles(
+        for tile in self.live_restricted_deployment_tiles(
             selected_card,
-            self.destroyed_enemy_princess_lanes(self.local_team),
             self.local_team,
         ):
             # A one-pixel inset preserves clear grid lines under the tint.

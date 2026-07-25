@@ -70,7 +70,7 @@ def test_command_line_selects_controllers_without_code_changes() -> None:
 def test_blue_and_red_have_independent_hands_and_elixir() -> None:
     viewer = make_controller_viewer()
 
-    assert viewer.try_play_action("blue", PlayCardAction(2, (4, 25)))
+    assert viewer.try_play_action("blue", PlayCardAction(2, (4, 26)))
 
     assert viewer.players["blue"].elixir.amount == 0
     assert viewer.players["red"].elixir.amount == 5
@@ -88,6 +88,22 @@ def test_red_placement_rules_are_mirrored_and_authoritative() -> None:
         entity.team == "red" and entity.name == "Giant"
         for entity in viewer.battle.entities
     )
+
+
+def test_controller_legal_actions_exclude_occupied_tower_tiles() -> None:
+    viewer = make_controller_viewer()
+    blue_princess = next(
+        entity
+        for entity in viewer.battle.entities
+        if entity.team == "blue" and entity.tower_kind == "princess"
+    )
+    tower_tile = viewer.screen_to_tile(blue_princess.position)
+
+    assert tower_tile is not None
+    blocked_action = PlayCardAction(2, tower_tile)
+    assert blocked_action not in viewer.legal_actions_for("blue")
+    assert not viewer.try_play_action("blue", blocked_action)
+    assert viewer.players["blue"].elixir.amount == 5
 
 
 def test_scripted_controller_only_returns_a_legal_action() -> None:

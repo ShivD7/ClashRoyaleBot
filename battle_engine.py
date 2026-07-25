@@ -150,6 +150,7 @@ class BattleEngine:
     BUILDING_AVOIDANCE_TILES = 1.4
     BRIDGE_HALF_WIDTH_TILES = 1.0
     BRIDGE_CONGESTION_PENALTY_TILES = 0.35
+    PLACEMENT_EPSILON = 1e-6
     # Non-engaging opponents may overlap slightly while sliding past. Full
     # collision still applies to allies, buildings, and troops fighting one
     # another.
@@ -335,21 +336,82 @@ class BattleEngine:
             )
 
         spawned = []
-        spacing = min(12.0, self.tile_size * 0.4)
-        middle = (card.unit_count - 1) / 2
-
-        for index in range(card.unit_count):
-            offset_x = (index - middle) * spacing
+        for index, spawn_position in enumerate(
+            self._spawn_positions(card, position),
+        ):
             spawned.append(
                 self._spawn_unit(
                     card,
                     team,
-                    (position[0] + offset_x, position[1]),
+                    spawn_position,
                     index,
                 )
             )
 
         return tuple(spawned)
+
+    def _spawn_positions(
+        self,
+        card: CardLike,
+        position: tuple[float, float],
+    ) -> tuple[pygame.Vector2, ...]:
+        """Return every body center produced by one card deployment."""
+        spacing = min(12.0, self.tile_size * 0.4)
+        middle = (card.unit_count - 1) / 2
+        return tuple(
+            pygame.Vector2(
+                position[0] + (index - middle) * spacing,
+                position[1],
+            )
+            for index in range(card.unit_count)
+        )
+
+    def can_deploy_card(
+        self,
+        card: CardLike,
+        position: tuple[float, float],
+    ) -> bool:
+        """Check whether every spawned body fits at an arena position.
+
+        Troops may be dropped onto other troops because normal movement
+        collision separates them immediately. No troop may originate inside a
+        tower or deployable building. Buildings additionally require clear
+        ground and cannot be placed over any ground troop.
+        """
+        if card.card_type == "spell":
+            return True
+        if card.unit_stats is None:
+            raise ValueError(
+                f"{card.card_type.title()} card {card.name} "
+                "has no unit statistics",
+            )
+
+        radius = card.unit_stats.body_radius
+        is_building = card.card_type == "building"
+        for spawn_position in self._spawn_positions(card, position):
+            if (
+                spawn_position.x - radius < self.arena_left
+                or spawn_position.x + radius > self.arena_right
+                or spawn_position.y - radius < 0
+                or spawn_position.y + radius > self.screen_height
+            ):
+                return False
+
+            for entity in self.living_entities:
+                blocks_placement = entity.is_building or (
+                    is_building and entity.movement_type == "ground"
+                )
+                if not blocks_placement:
+                    continue
+
+                required_distance = radius + entity.radius
+                actual_distance = spawn_position.distance_to(entity.position)
+                if actual_distance < (
+                    required_distance - self.PLACEMENT_EPSILON
+                ):
+                    return False
+
+        return True
 
     def _spawn_unit(
         self,

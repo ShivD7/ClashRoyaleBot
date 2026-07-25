@@ -382,6 +382,72 @@ def test_buildings_cannot_be_deployed_on_bridges(team: str) -> None:
     )
 
 
+def test_live_placement_rejects_tower_footprint_without_spending() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_card_index = 0
+    viewer.elixir = ElixirMeter(amount=10)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    viewer.deployments = []
+    viewer.battle = viewer.create_battle_engine()
+    blue_princess = next(
+        entity
+        for entity in viewer.battle.entities
+        if entity.team == "blue" and entity.tower_kind == "princess"
+    )
+    tower_tile = viewer.screen_to_tile(blue_princess.position)
+
+    assert tower_tile is not None
+    assert ArenaViewer.is_valid_deployment_tile(
+        tower_tile,
+        viewer.card_cycle.hand[0],
+    )
+    assert not viewer.is_valid_live_deployment(
+        tower_tile,
+        viewer.card_cycle.hand[0],
+        "blue",
+    )
+    assert tower_tile in viewer.live_restricted_deployment_tiles(
+        viewer.card_cycle.hand[0],
+        "blue",
+    )
+
+    original_hand = viewer.card_cycle.hand.copy()
+    assert not viewer.try_play_selected_card(tower_tile)
+    assert viewer.elixir.amount == 10
+    assert viewer.card_cycle.hand == original_hand
+    assert viewer.deployments == []
+
+
+def test_live_placement_prevents_building_stacking_but_allows_clear_tile() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_card_index = 0
+    viewer.elixir = ElixirMeter(amount=10)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    cannon = next(card for card in CARD_CATALOG if card.name == "Cannon")
+    viewer.card_cycle.hand[0] = cannon
+    viewer.deployments = []
+    viewer.battle = viewer.create_battle_engine()
+    occupied_tile = (8, 20)
+    occupied_center = viewer.tile_rectangle(occupied_tile).center
+    viewer.battle.deploy_card(cannon, "blue", occupied_center)
+
+    assert not viewer.is_valid_live_deployment(
+        occupied_tile,
+        cannon,
+        "blue",
+    )
+    assert not viewer.try_play_selected_card(occupied_tile)
+    assert viewer.elixir.amount == 10
+
+    adjacent_tile = (9, 20)
+    assert not viewer.is_valid_live_deployment(adjacent_tile, cannon, "blue")
+
+    clear_tile = (10, 20)
+    assert viewer.is_valid_live_deployment(clear_tile, cannon, "blue")
+    assert viewer.try_play_selected_card(clear_tile)
+    assert viewer.elixir.amount == 7
+
+
 def test_destroyed_princess_towers_unlock_their_enemy_lane_halves() -> None:
     knight = next(card for card in DEFAULT_DECK if card.name == "Knight")
     unlocked_row = ENEMY_DEPLOYMENT_UNLOCK_TOP // TILE_SIZE
