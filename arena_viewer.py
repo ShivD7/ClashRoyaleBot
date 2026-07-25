@@ -42,6 +42,7 @@ import pygame
 from battle_engine import (
     BattleEngine,
     BattleEntity,
+    EntityState,
     SpawnedCard,
     SpellStats,
     SpawnerStats,
@@ -947,15 +948,15 @@ CARD_CATALOG = (
         "nearest_enemy",
         "air_and_ground",
         "ground",
-        "ranged",
+        "beam",
         1,
         UnitStats(
-            1749,
-            240,
-            1.0,
+            1748,
+            43,
+            0.4,
             0.0,
             6.0,
-            20.0,
+            inferno_damage_stages=(43, 159, 848),
             body_radius=15.0,
             mass=1000.0,
             knockback_resistance=1.0,
@@ -1037,7 +1038,7 @@ CARD_CATALOG = (
         "nearest_enemy",
         "air_and_ground",
         "ground",
-        "melee",
+        "leap",
         1,
         UnitStats(
             230,
@@ -1046,6 +1047,8 @@ CARD_CATALOG = (
             2.0,
             2.5,
             attack_splash_radius=1.5,
+            freeze_duration=1.1,
+            self_destructs_on_attack=True,
             body_radius=6.0,
             mass=0.4,
         ),
@@ -2837,6 +2840,8 @@ class ArenaViewer:
                 self.draw_princess_tower(tower)
 
             self.draw_health_bar(entity, width=58)
+            if entity.freeze_remaining > 0:
+                self.draw_freeze_effect(entity)
 
     def draw_health_bar(
         self,
@@ -2898,6 +2903,7 @@ class ArenaViewer:
             "Skeleton Army": (226, 224, 211),
             "Minions": (111, 105, 202),
             "Hog Rider": (166, 104, 67),
+            "Ice Spirit": (126, 229, 255),
         }
 
         for entity in self.battle.entities:
@@ -2956,6 +2962,8 @@ class ArenaViewer:
             label = self.card_font.render(initials, True, TOWER_OPENING_COLOR)
             self.screen.blit(label, label.get_rect(center=center))
             self.draw_health_bar(entity, center=center)
+            if entity.freeze_remaining > 0:
+                self.draw_freeze_effect(entity)
 
     def draw_deployed_buildings(self) -> None:
         """Draw player-deployed buildings separately from permanent towers."""
@@ -2971,6 +2979,15 @@ class ArenaViewer:
             team_color = (
                 BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
             )
+            if entity.name == "Inferno Tower":
+                self.draw_inferno_tower_building(entity, center, team_color)
+                self.draw_health_bar(entity, width=36)
+                continue
+            if entity.name == "Tombstone":
+                self.draw_tombstone_building(entity, center, team_color)
+                self.draw_health_bar(entity, width=36)
+                continue
+
             foundation = pygame.Rect(0, 0, 30, 26)
             foundation.center = center
             pygame.draw.rect(
@@ -2998,14 +3015,136 @@ class ArenaViewer:
             )
             pygame.draw.circle(self.screen, (69, 72, 80), center, 8)
             self.draw_health_bar(entity, width=36)
+            if entity.freeze_remaining > 0:
+                self.draw_freeze_effect(entity)
+
+    def draw_inferno_tower_building(
+        self,
+        entity: BattleEntity,
+        center: tuple[int, int],
+        team_color: tuple[int, int, int],
+    ) -> None:
+        """Draw the Inferno Tower as a furnace instead of a Cannon clone."""
+        base = pygame.Rect(0, 0, 34, 29)
+        base.center = center
+        pygame.draw.rect(self.screen, team_color, base, border_radius=7)
+        pygame.draw.rect(
+            self.screen,
+            (72, 55, 62),
+            base.inflate(-6, -4),
+            border_radius=5,
+        )
+        column = pygame.Rect(0, 0, 15, 25)
+        column.midbottom = (center[0], center[1] + 10)
+        pygame.draw.rect(self.screen, (45, 38, 45), column, border_radius=4)
+        pygame.draw.line(
+            self.screen,
+            (132, 91, 60),
+            (center[0] - 10, center[1] + 7),
+            (center[0] + 10, center[1] + 7),
+            4,
+        )
+        pygame.draw.circle(self.screen, (255, 104, 34), center, 8)
+        pygame.draw.circle(self.screen, (255, 218, 75), center, 4)
+        if entity.freeze_remaining > 0:
+            self.draw_freeze_effect(entity)
+
+    def draw_tombstone_building(
+        self,
+        entity: BattleEntity,
+        center: tuple[int, int],
+        team_color: tuple[int, int, int],
+    ) -> None:
+        """Draw a grave marker that is unmistakable from defensive weapons."""
+        earth = pygame.Rect(0, 0, 36, 12)
+        earth.center = (center[0], center[1] + 10)
+        pygame.draw.ellipse(self.screen, team_color, earth.inflate(4, 4))
+        pygame.draw.ellipse(self.screen, (84, 67, 54), earth)
+        marker = pygame.Rect(0, 0, 23, 29)
+        marker.midbottom = (center[0], center[1] + 10)
+        pygame.draw.rect(self.screen, (99, 103, 112), marker, border_radius=8)
+        pygame.draw.rect(self.screen, (156, 160, 168), marker, 3, border_radius=8)
+        pygame.draw.line(
+            self.screen,
+            (61, 64, 72),
+            (center[0], center[1] - 7),
+            (center[0], center[1] + 6),
+            3,
+        )
+        pygame.draw.line(
+            self.screen,
+            (61, 64, 72),
+            (center[0] - 5, center[1] - 2),
+            (center[0] + 5, center[1] - 2),
+            3,
+        )
+        pygame.draw.line(
+            self.screen,
+            (68, 70, 78),
+            (center[0] + 5, center[1] + 5),
+            (center[0] + 9, center[1] + 1),
+            2,
+        )
+        if entity.freeze_remaining > 0:
+            self.draw_freeze_effect(entity)
+
+    def draw_freeze_effect(self, entity: BattleEntity) -> None:
+        """Overlay a compact icy ring on a currently frozen combat entity."""
+        center = (round(entity.position.x), round(entity.position.y))
+        radius = round(entity.radius) + 5
+        pygame.draw.circle(self.screen, (126, 229, 255), center, radius, 3)
+        pygame.draw.line(
+            self.screen,
+            (220, 250, 255),
+            (center[0] - radius, center[1]),
+            (center[0] + radius, center[1]),
+            2,
+        )
+        pygame.draw.line(
+            self.screen,
+            (220, 250, 255),
+            (center[0], center[1] - radius),
+            (center[0], center[1] + radius),
+            2,
+        )
 
     def draw_projectiles(self) -> None:
         """Draw arrows and ranged shots as small moving rectangles."""
+        for attacker in self.battle.entities:
+            if (
+                not attacker.is_alive
+                or attacker.inferno_damage_stages is None
+                or attacker.freeze_remaining > 0
+                or attacker.state is not EntityState.ATTACKING
+            ):
+                continue
+            target = self.battle.entity_by_id(attacker.target_id)
+            if target is None or not target.is_alive:
+                continue
+            if attacker.target_lock_elapsed < 2.0:
+                beam_color, beam_width = (255, 211, 74), 2
+            elif attacker.target_lock_elapsed < 4.0:
+                beam_color, beam_width = (255, 128, 40), 4
+            else:
+                beam_color, beam_width = (255, 55, 34), 6
+            pygame.draw.line(
+                self.screen,
+                beam_color,
+                attacker.position,
+                target.position,
+                beam_width,
+            )
+
         for projectile in self.battle.projectiles:
             center = (
                 round(projectile.position.x),
                 round(projectile.position.y),
             )
+            if projectile.visual_style == "ice_spirit":
+                pygame.draw.circle(self.screen, (48, 142, 205), center, 8)
+                pygame.draw.circle(self.screen, projectile.color, center, 6)
+                pygame.draw.circle(self.screen, (235, 253, 255), center, 2)
+                continue
             pygame.draw.rect(
                 self.screen,
                 projectile.color,

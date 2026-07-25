@@ -355,6 +355,24 @@ def test_training_catalog_covers_requested_card_roles() -> None:
     assert cards["Tombstone"].unit_stats.spawner is not None
 
 
+def test_inferno_tower_and_ice_spirit_have_special_attack_stats() -> None:
+    cards = {card.name: card for card in CARD_CATALOG}
+    inferno = cards["Inferno Tower"]
+    ice_spirit = cards["Ice Spirit"]
+
+    assert inferno.attack_style == "beam"
+    assert inferno.unit_stats is not None
+    assert inferno.unit_stats.projectile_speed == 0
+    assert inferno.unit_stats.hit_speed == 0.4
+    assert inferno.unit_stats.inferno_damage_stages == (43, 159, 848)
+
+    assert ice_spirit.attack_style == "leap"
+    assert ice_spirit.unit_stats is not None
+    assert ice_spirit.unit_stats.freeze_duration == 1.1
+    assert ice_spirit.unit_stats.attack_splash_radius == 1.5
+    assert ice_spirit.unit_stats.self_destructs_on_attack
+
+
 def test_fireball_and_zap_have_current_damage_radii() -> None:
     cards = {card.name: card for card in DEFAULT_DECK}
 

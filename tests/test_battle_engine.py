@@ -193,6 +193,137 @@ def test_tombstone_spawns_two_skeletons_every_three_point_three_seconds() -> Non
     assert tombstone.is_alive
 
 
+def test_inferno_tower_uses_continuous_three_stage_beam_without_projectiles() -> None:
+    engine = make_engine()
+    for tower in engine.entities:
+        tower.damage = 0
+    inferno = engine.deploy_card(
+        card_named("Inferno Tower"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "red",
+        (LEFT_LANE_X, 400),
+    )[0]
+    giant.movement_speed = 0
+    starting_health = giant.health
+
+    engine.update(2.0)
+    assert giant.health == pytest.approx(starting_health - 43 / 0.4 * 2)
+    assert inferno.target_lock_elapsed == pytest.approx(2.0)
+    assert engine.projectiles == []
+
+    engine.update(2.0)
+    assert giant.health == pytest.approx(
+        starting_health - 43 / 0.4 * 2 - 159 / 0.4 * 2,
+    )
+
+    engine.update(0.4)
+    assert giant.health == pytest.approx(
+        starting_health - 43 / 0.4 * 2 - 159 / 0.4 * 2 - 848,
+    )
+    assert engine.projectiles == []
+
+
+def test_inferno_tower_losing_or_freezing_lock_resets_damage_ramp() -> None:
+    engine = make_engine()
+    for tower in engine.entities:
+        tower.damage = 0
+    inferno = engine.deploy_card(
+        card_named("Inferno Tower"),
+        "blue",
+        (LEFT_LANE_X, 500),
+    )[0]
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        "red",
+        (LEFT_LANE_X, 400),
+    )[0]
+    giant.movement_speed = 0
+
+    engine.update(4.1)
+    assert inferno.target_lock_elapsed == pytest.approx(4.1)
+
+    assert engine.apply_freeze(inferno.entity_id, 1.1)
+    assert inferno.target_lock_elapsed == 0
+    frozen_health = giant.health
+    engine.update(1.0)
+    assert giant.health == frozen_health
+
+    giant.position.y = 100
+    engine.update(0.2)
+    assert inferno.target_id is None
+    assert inferno.target_lock_elapsed == 0
+
+
+def test_ice_spirit_leaps_then_splash_damages_and_freezes_for_1_1_seconds() -> None:
+    engine = make_engine()
+    for tower in engine.entities:
+        tower.damage = 0
+    spirit = engine.deploy_card(
+        card_named("Ice Spirit"),
+        "blue",
+        (300, 500),
+    )[0]
+    primary = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (300, 450),
+    )[0]
+    nearby = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (330, 450),
+    )[0]
+    distant = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (390, 450),
+    )[0]
+    for target in (primary, nearby, distant):
+        target.movement_speed = 0
+
+    engine.update(0.01)
+
+    assert not spirit.is_alive
+    spirit_leaps = [
+        projectile
+        for projectile in engine.projectiles
+        if projectile.visual_style == "ice_spirit"
+    ]
+    assert len(spirit_leaps) == 1
+
+    engine.update(0.2)
+
+    assert primary.health == primary.max_health - spirit.damage
+    assert nearby.health == nearby.max_health - spirit.damage
+    assert distant.health == distant.max_health
+    assert primary.freeze_remaining == pytest.approx(1.1)
+    assert nearby.freeze_remaining == pytest.approx(1.1)
+    assert distant.freeze_remaining == 0
+
+
+def test_frozen_troop_cannot_move_until_ice_spirit_freeze_expires() -> None:
+    engine = make_engine()
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        (LEFT_LANE_X, 450),
+    )[0]
+    starting_position = knight.position.copy()
+
+    assert engine.apply_freeze(knight.entity_id, 1.1)
+    engine.update(1.0)
+    assert knight.position == starting_position
+    assert knight.freeze_remaining == pytest.approx(0.1)
+
+    engine.update(0.15)
+    assert knight.freeze_remaining == 0
+    assert knight.position != starting_position
+
+
 def test_destroyed_tombstone_stops_spawning_waves() -> None:
     engine = make_engine()
     tombstone = engine.deploy_card(
