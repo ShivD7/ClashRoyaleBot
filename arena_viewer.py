@@ -3153,7 +3153,7 @@ class ArenaViewer:
             )
 
     def draw_stun_effects(self) -> None:
-        """Draw a strong aura, electrical bolts, and label on stunned entities."""
+        """Draw a pulsing aura and electrical bolts on stunned entities."""
         pulse_size = 3 if (pygame.time.get_ticks() // 100) % 2 else 0
         for entity in self.battle.living_entities:
             if entity.stun_remaining <= 0:
@@ -3207,37 +3207,6 @@ class ArenaViewer:
                     points,
                     2,
                 )
-
-            # Text removes any ambiguity about whether the yellow effect means
-            # damage, selection, or a temporary combat status.
-            label = self.timer_label_font.render(
-                "STUNNED",
-                True,
-                STUN_EFFECT_HIGHLIGHT_COLOR,
-            )
-            label_panel = label.get_rect()
-            label_panel.inflate_ip(10, 5)
-            label_panel.midbottom = (
-                center_x,
-                center_y - effect_radius - 9,
-            )
-            label_panel.clamp_ip(self.screen.get_rect())
-            panel = pygame.Surface(label_panel.size, pygame.SRCALPHA)
-            pygame.draw.rect(
-                panel,
-                (32, 27, 8, 225),
-                panel.get_rect(),
-                border_radius=5,
-            )
-            pygame.draw.rect(
-                panel,
-                (*STUN_EFFECT_COLOR, 245),
-                panel.get_rect(),
-                2,
-                border_radius=5,
-            )
-            self.screen.blit(panel, label_panel.topleft)
-            self.screen.blit(label, label.get_rect(center=label_panel.center))
 
     # ------------------------------------------------------------------
     # Draw selection and game information
