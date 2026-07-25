@@ -191,6 +191,8 @@ TIEBREAKER_DAMAGE_PER_SECOND = 600.0
 TIEBREAKER_NOTICE_PANEL_COLOR = (10, 10, 13, 235)
 TIEBREAKER_NOTICE_TEXT_COLOR = (255, 84, 76)
 TIEBREAKER_EFFECT_COLOR = (255, 65, 57)
+STUN_EFFECT_COLOR = (255, 232, 66)
+STUN_EFFECT_HIGHLIGHT_COLOR = (255, 252, 190)
 
 # The temporary card HUD sits immediately above the Elixir bar. Keeping these
 # measurements together makes both drawing and mouse hit-testing use the same
@@ -651,7 +653,7 @@ CARD_CATALOG = (
         "area",
         0,
         None,
-        SpellStats(192, 58, 2.5),
+        SpellStats(192, 58, 2.5, stun_duration=0.5),
     ),
     Card(
         "Minions",
@@ -2969,6 +2971,37 @@ class ArenaViewer:
                 border_radius=2,
             )
 
+    def draw_stun_effects(self) -> None:
+        """Draw small electrical bolts around every currently stunned entity."""
+        for entity in self.battle.living_entities:
+            if entity.stun_remaining <= 0:
+                continue
+
+            center_x = round(entity.position.x)
+            center_y = round(entity.position.y)
+            effect_radius = round(entity.radius) + 7
+            pygame.draw.circle(
+                self.screen,
+                STUN_EFFECT_COLOR,
+                (center_x, center_y),
+                effect_radius,
+                2,
+            )
+            for direction in (-1, 1):
+                points = (
+                    (center_x + direction * 3, center_y - effect_radius - 4),
+                    (center_x - direction * 2, center_y - effect_radius + 2),
+                    (center_x + direction * 4, center_y - effect_radius + 2),
+                    (center_x, center_y - effect_radius + 9),
+                )
+                pygame.draw.lines(
+                    self.screen,
+                    STUN_EFFECT_HIGHLIGHT_COLOR,
+                    False,
+                    points,
+                    2,
+                )
+
     # ------------------------------------------------------------------
     # Draw selection and game information
     # ------------------------------------------------------------------
@@ -3844,6 +3877,7 @@ class ArenaViewer:
         self.draw_tiebreaker_tower_effects()
         self.draw_deployed_buildings()
         self.draw_units()
+        self.draw_stun_effects()
         self.draw_projectiles()
         self.draw_tile_highlights()
         # Draw after combat objects so the full affected area remains readable.

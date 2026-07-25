@@ -362,6 +362,7 @@ def test_fireball_and_zap_have_current_damage_radii() -> None:
     assert cards["Fireball"].spell_stats.radius == 2.5
     assert cards["Zap"].spell_stats is not None
     assert cards["Zap"].spell_stats.radius == 2.5
+    assert cards["Zap"].spell_stats.stun_duration == 0.5
 
 
 def test_wizard_and_skeleton_army_have_current_level_11_stats() -> None:
