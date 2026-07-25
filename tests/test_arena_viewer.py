@@ -1143,3 +1143,64 @@ def test_elixir_can_only_be_spent_when_affordable() -> None:
 
     assert meter.spend(3)
     assert meter.amount == pytest.approx(0.5)
+
+
+def test_home_screen_has_eight_deck_slots_and_every_collection_card() -> None:
+    deck_slots = ArenaViewer.home_deck_slot_rectangles()
+    collection_cards = ArenaViewer.home_collection_card_rectangles()
+
+    assert len(deck_slots) == 8
+    assert len(collection_cards) == len(CARD_CATALOG)
+    assert all(not left.colliderect(right) for left, right in zip(deck_slots, deck_slots[1:]))
+
+
+def test_collection_card_replaces_a_deck_slot_without_changing_deck_size() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_deck = list(DEFAULT_DECK)
+    new_card = next(card for card in CARD_CATALOG if card.name == "Mini P.E.K.K.A")
+
+    viewer.replace_deck_slot(0, new_card)
+
+    assert viewer.selected_deck[0] == new_card
+    assert len(viewer.selected_deck) == 8
+    assert len(set(viewer.selected_deck)) == 8
+
+
+def test_dropping_an_existing_deck_card_swaps_slots() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_deck = list(DEFAULT_DECK)
+    first_card = viewer.selected_deck[0]
+    second_card = viewer.selected_deck[1]
+
+    viewer.replace_deck_slot(1, first_card)
+
+    assert viewer.selected_deck[0] == second_card
+    assert viewer.selected_deck[1] == first_card
+
+
+def test_selected_deck_is_used_only_by_the_local_team() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.local_team = "red"
+    viewer.selected_deck = list(DEFAULT_DECK)
+    replacement = next(card for card in CARD_CATALOG if card.name == "Rocket")
+    viewer.selected_deck[0] = replacement
+
+    players = viewer.create_player_states()
+
+    assert players["red"].card_cycle.deck[0] == replacement
+    assert players["blue"].card_cycle.deck == DEFAULT_DECK
+
+
+def test_return_home_keeps_the_selected_deck() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.selected_deck = list(DEFAULT_DECK)
+    viewer.screen_state = "battle"
+    viewer.home_dragged_card_index = 4
+    viewer.home_drag_position = (100, 100)
+
+    viewer.return_home()
+
+    assert viewer.screen_state == "home"
+    assert viewer.selected_deck == list(DEFAULT_DECK)
+    assert viewer.home_dragged_card_index is None
+    assert viewer.home_drag_position is None

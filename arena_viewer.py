@@ -110,6 +110,18 @@ STADIUM_TIER_COLOR = (103, 84, 63)
 STADIUM_RAIL_COLOR = (154, 145, 124)
 SPECTATOR_SKIN_COLOR = (221, 171, 121)
 
+# The home screen uses stone, timber, parchment, and gold to create a simple
+# medieval menu without needing external art files.
+HOME_STONE_COLOR = (75, 70, 64)
+HOME_STONE_LIGHT_COLOR = (96, 89, 79)
+HOME_STONE_DARK_COLOR = (47, 43, 40)
+HOME_WOOD_COLOR = (91, 52, 31)
+HOME_WOOD_LIGHT_COLOR = (132, 79, 42)
+HOME_PARCHMENT_COLOR = (213, 183, 128)
+HOME_PARCHMENT_DARK_COLOR = (128, 84, 43)
+HOME_GOLD_COLOR = (238, 190, 60)
+HOME_GOLD_DARK_COLOR = (139, 87, 24)
+
 # ---------------------------------------------------------------------------
 # Arena layout
 # ---------------------------------------------------------------------------
@@ -1105,6 +1117,12 @@ class ArenaViewer:
         self.timer_font.set_bold(True)
         self.match_over_font = pygame.font.Font(None, 52)
         self.match_over_font.set_bold(True)
+        self.home_title_font = pygame.font.Font(None, 50)
+        self.home_title_font.set_bold(True)
+        self.home_heading_font = pygame.font.Font(None, 30)
+        self.home_heading_font.set_bold(True)
+        self.home_card_font = pygame.font.Font(None, 17)
+        self.home_card_font.set_bold(True)
 
         # Save the start time for the timer. Elixir tracks its own elapsed time.
         self.match_started_at = pygame.time.get_ticks()
@@ -1142,6 +1160,11 @@ class ArenaViewer:
             ),
             "blue",
         )
+        # The chosen deck survives rematches and trips back to the home screen.
+        self.selected_deck = list(DEFAULT_DECK)
+        self.screen_state = "home"
+        self.home_dragged_card_index: int | None = None
+        self.home_drag_position: tuple[int, int] | None = None
         self.players = self.create_player_states()
         self.sync_local_player_aliases()
         self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
@@ -1186,13 +1209,16 @@ class ArenaViewer:
             ),
         )
 
-    @staticmethod
-    def create_player_states() -> dict[str, PlayerState]:
-        """Create equal independent hand, queue, and Elixir state for each side."""
+    def create_player_states(self) -> dict[str, PlayerState]:
+        """Create independent match state and give the local side its deck."""
+        local_team = getattr(self, "local_team", "blue")
+        selected_deck = tuple(getattr(self, "selected_deck", DEFAULT_DECK))
         return {
             team: PlayerState(
                 team=team,
-                card_cycle=CardCycle(DEFAULT_DECK),
+                card_cycle=CardCycle(
+                    selected_deck if team == local_team else DEFAULT_DECK,
+                ),
                 elixir=ElixirMeter(),
             )
             for team in ("blue", "red")
@@ -1214,6 +1240,8 @@ class ArenaViewer:
             }
         if not hasattr(self, "local_team"):
             self.local_team = "blue"
+        if not hasattr(self, "selected_deck"):
+            self.selected_deck = list(DEFAULT_DECK)
         self.players = self.create_player_states()
         self.sync_local_player_aliases()
         self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
@@ -1249,9 +1277,70 @@ class ArenaViewer:
     @staticmethod
     def play_again_button_rectangle() -> pygame.Rect:
         """Return the logical-space button used for drawing and hit testing."""
-        button = pygame.Rect(0, 0, 190, 44)
-        button.center = (SCREEN_WIDTH // 2, ARENA_HEIGHT // 2 + 70)
+        button = pygame.Rect(0, 0, 150, 44)
+        button.center = (SCREEN_WIDTH // 2 - 83, ARENA_HEIGHT // 2 + 70)
         return button
+
+    @staticmethod
+    def match_home_button_rectangle() -> pygame.Rect:
+        """Return the Home button shown beside Play Again after a match."""
+        button = pygame.Rect(0, 0, 150, 44)
+        button.center = (SCREEN_WIDTH // 2 + 83, ARENA_HEIGHT // 2 + 70)
+        return button
+
+    @staticmethod
+    def home_play_button_rectangle() -> pygame.Rect:
+        """Return the large Play button at the bottom of the home screen."""
+        return pygame.Rect(155, 874, 280, 58)
+
+    @staticmethod
+    def home_deck_slot_rectangles() -> tuple[pygame.Rect, ...]:
+        """Return the eight deck slots in two rows of four."""
+        return tuple(
+            pygame.Rect(59 + column * 120, 158 + row * 84, 112, 70)
+            for row in range(2)
+            for column in range(4)
+        )
+
+    @staticmethod
+    def home_collection_card_rectangles() -> tuple[pygame.Rect, ...]:
+        """Return one compact card rectangle for every catalog entry."""
+        return tuple(
+            pygame.Rect(39 + (index % 5) * 103, 371 + (index // 5) * 76, 94, 66)
+            for index in range(len(CARD_CATALOG))
+        )
+
+    def replace_deck_slot(self, slot_index: int, card: Card) -> None:
+        """Put a card in a deck slot, swapping when it is already selected."""
+        if not 0 <= slot_index < 8:
+            raise IndexError("Deck slot must be between 0 and 7")
+
+        current_index = next(
+            (
+                index
+                for index, selected_card in enumerate(self.selected_deck)
+                if selected_card == card
+            ),
+            None,
+        )
+        if current_index is None:
+            self.selected_deck[slot_index] = card
+        elif current_index != slot_index:
+            self.selected_deck[current_index], self.selected_deck[slot_index] = (
+                self.selected_deck[slot_index],
+                self.selected_deck[current_index],
+            )
+
+    def start_match(self) -> None:
+        """Start a fresh match with the selected deck and launch controllers."""
+        self.reset_match()
+        self.screen_state = "battle"
+
+    def return_home(self) -> None:
+        """Return to deck building while keeping the current eight cards."""
+        self.screen_state = "home"
+        self.home_dragged_card_index = None
+        self.home_drag_position = None
 
     def match_result_text(self) -> tuple[str, str]:
         """Return the final outcome title and Crown score."""
@@ -1960,6 +2049,45 @@ class ArenaViewer:
     # ------------------------------------------------------------------
     # Input
     # ------------------------------------------------------------------
+    def handle_home_event(self, event: pygame.event.Event) -> None:
+        """Handle dragging collection cards and pressing Play."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            position = self.display_to_logical_position(event.pos)
+            if self.home_play_button_rectangle().collidepoint(position):
+                self.start_match()
+                return
+
+            for index, card_rectangle in enumerate(
+                self.home_collection_card_rectangles(),
+            ):
+                if card_rectangle.collidepoint(position):
+                    self.home_dragged_card_index = index
+                    self.home_drag_position = position
+                    return
+
+        elif event.type == pygame.MOUSEMOTION:
+            if self.home_dragged_card_index is not None:
+                self.home_drag_position = self.display_to_logical_position(
+                    event.pos,
+                )
+
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.home_dragged_card_index is None:
+                return
+
+            position = self.display_to_logical_position(event.pos)
+            for slot_index, slot_rectangle in enumerate(
+                self.home_deck_slot_rectangles(),
+            ):
+                if slot_rectangle.collidepoint(position):
+                    self.replace_deck_slot(
+                        slot_index,
+                        CARD_CATALOG[self.home_dragged_card_index],
+                    )
+                    break
+            self.home_dragged_card_index = None
+            self.home_drag_position = None
+
     def handle_events(self) -> None:
         """Handle keyboard and mouse input for one frame.
 
@@ -1969,11 +2097,19 @@ class ArenaViewer:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+                continue
 
-            elif event.type == pygame.KEYDOWN:
+            if event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     self.running = False
-                elif self.match_finished:
+                    continue
+
+            if self.screen_state == "home":
+                self.handle_home_event(event)
+                continue
+
+            if event.type == pygame.KEYDOWN:
+                if self.match_finished:
                     continue
                 elif event.key == pygame.K_SPACE:
                     # Space cancels both selections without changing game state.
@@ -2001,6 +2137,10 @@ class ArenaViewer:
                         logical_position,
                     ):
                         self.reset_match()
+                    elif self.match_home_button_rectangle().collidepoint(
+                        logical_position,
+                    ):
+                        self.return_home()
                     continue
 
                 if not isinstance(
@@ -2041,6 +2181,199 @@ class ArenaViewer:
     # ------------------------------------------------------------------
     # Draw the arena and buildings
     # ------------------------------------------------------------------
+    def draw_home_panel(self, rectangle: pygame.Rect) -> None:
+        """Draw a raised parchment panel held inside a dark wooden frame."""
+        shadow = rectangle.move(5, 6)
+        pygame.draw.rect(self.screen, HOME_STONE_DARK_COLOR, shadow, border_radius=9)
+        pygame.draw.rect(self.screen, HOME_WOOD_COLOR, rectangle, border_radius=9)
+        pygame.draw.rect(
+            self.screen,
+            HOME_WOOD_LIGHT_COLOR,
+            rectangle,
+            3,
+            border_radius=9,
+        )
+        pygame.draw.rect(
+            self.screen,
+            HOME_PARCHMENT_COLOR,
+            rectangle.inflate(-12, -12),
+            border_radius=5,
+        )
+
+    @staticmethod
+    def home_card_color(card: Card) -> tuple[int, int, int]:
+        """Give troop, building, and spell cards different readable colors."""
+        return {
+            "troop": (58, 88, 119),
+            "building": (110, 73, 49),
+            "spell": (91, 58, 117),
+        }.get(card.card_type, CARD_BACKGROUND_COLOR)
+
+    def draw_home_card(
+        self,
+        card: Card,
+        rectangle: pygame.Rect,
+        *,
+        selected: bool = False,
+        dragging: bool = False,
+    ) -> None:
+        """Draw one card for a deck slot, collection entry, or drag preview."""
+        card_surface = pygame.Surface(rectangle.size, pygame.SRCALPHA)
+        alpha = 220 if dragging else 255
+        color = (*self.home_card_color(card), alpha)
+        pygame.draw.rect(
+            card_surface,
+            color,
+            card_surface.get_rect(),
+            border_radius=7,
+        )
+        border_color = HOME_GOLD_COLOR if selected else (199, 184, 151)
+        pygame.draw.rect(
+            card_surface,
+            (*border_color, alpha),
+            card_surface.get_rect(),
+            3,
+            border_radius=7,
+        )
+
+        cost_circle = (14, 14)
+        pygame.draw.circle(card_surface, (178, 50, 187), cost_circle, 11)
+        pygame.draw.circle(card_surface, (244, 128, 241), cost_circle, 11, 2)
+        cost = self.home_card_font.render(str(card.elixir_cost), True, TEXT_COLOR)
+        card_surface.blit(cost, cost.get_rect(center=cost_circle))
+
+        words = card.name.split()
+        lines = [card.name]
+        if len(card.name) > 12 and len(words) > 1:
+            split_at = max(1, len(words) // 2)
+            lines = [" ".join(words[:split_at]), " ".join(words[split_at:])]
+        text_y = 31 if len(lines) == 1 else 25
+        for line in lines:
+            name = self.home_card_font.render(line, True, TEXT_COLOR)
+            card_surface.blit(
+                name,
+                name.get_rect(center=(rectangle.width // 2, text_y)),
+            )
+            text_y += 16
+        self.screen.blit(card_surface, rectangle.topleft)
+
+    def draw_home_screen(self) -> None:
+        """Draw the medieval deck builder, collection, and Play action."""
+        self.screen.fill(HOME_STONE_COLOR)
+
+        # Offset stone blocks make a castle-wall background.
+        block_width = 98
+        block_height = 52
+        for row, y in enumerate(range(0, SCREEN_HEIGHT, block_height)):
+            offset = -(block_width // 2) if row % 2 else 0
+            for x in range(offset, SCREEN_WIDTH, block_width):
+                block = pygame.Rect(x + 2, y + 2, block_width - 4, block_height - 4)
+                pygame.draw.rect(self.screen, HOME_STONE_LIGHT_COLOR, block, 2)
+
+        # Timber beams frame the castle screen.
+        pygame.draw.rect(self.screen, HOME_WOOD_COLOR, (0, 0, SCREEN_WIDTH, 22))
+        pygame.draw.rect(
+            self.screen,
+            HOME_WOOD_LIGHT_COLOR,
+            (0, 18, SCREEN_WIDTH, 5),
+        )
+        pygame.draw.rect(self.screen, HOME_WOOD_COLOR, (0, 0, 20, SCREEN_HEIGHT))
+        pygame.draw.rect(
+            self.screen,
+            HOME_WOOD_COLOR,
+            (SCREEN_WIDTH - 20, 0, 20, SCREEN_HEIGHT),
+        )
+
+        banner = pygame.Rect(88, 32, 414, 79)
+        pygame.draw.polygon(
+            self.screen,
+            RED_TEAM_COLOR,
+            (banner.topleft, banner.topright, (475, 128), (295, 108), (115, 128)),
+        )
+        pygame.draw.rect(self.screen, HOME_GOLD_COLOR, banner, 4)
+        title = self.home_title_font.render("BATTLE DECK", True, HOME_GOLD_COLOR)
+        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 65)))
+        subtitle = self.home_card_font.render(
+            f"Blue: {self.controllers['blue'].name}   vs   Red: {self.controllers['red'].name}",
+            True,
+            TEXT_COLOR,
+        )
+        self.screen.blit(subtitle, subtitle.get_rect(center=(SCREEN_WIDTH // 2, 96)))
+
+        deck_panel = pygame.Rect(40, 125, 510, 200)
+        self.draw_home_panel(deck_panel)
+        deck_heading = self.home_heading_font.render(
+            "YOUR 8-CARD DECK",
+            True,
+            HOME_PARCHMENT_DARK_COLOR,
+        )
+        self.screen.blit(deck_heading, deck_heading.get_rect(center=(295, 141)))
+        for slot_index, (card, rectangle) in enumerate(
+            zip(self.selected_deck, self.home_deck_slot_rectangles()),
+        ):
+            pygame.draw.rect(
+                self.screen,
+                HOME_STONE_DARK_COLOR,
+                rectangle.inflate(4, 4),
+                border_radius=8,
+            )
+            self.draw_home_card(card, rectangle)
+            slot_label = self.home_card_font.render(
+                str(slot_index + 1),
+                True,
+                HOME_GOLD_COLOR,
+            )
+            self.screen.blit(slot_label, (rectangle.right - 15, rectangle.y + 5))
+
+        collection_panel = pygame.Rect(26, 326, 538, 511)
+        self.draw_home_panel(collection_panel)
+        collection_heading = self.home_heading_font.render(
+            "CARD COLLECTION - DRAG TO REPLACE",
+            True,
+            HOME_PARCHMENT_DARK_COLOR,
+        )
+        self.screen.blit(
+            collection_heading,
+            collection_heading.get_rect(center=(295, 346)),
+        )
+        selected_cards = set(self.selected_deck)
+        for index, (card, rectangle) in enumerate(
+            zip(CARD_CATALOG, self.home_collection_card_rectangles()),
+        ):
+            if index == self.home_dragged_card_index:
+                continue
+            self.draw_home_card(card, rectangle, selected=card in selected_cards)
+
+        play_button = self.home_play_button_rectangle()
+        pygame.draw.rect(
+            self.screen,
+            HOME_STONE_DARK_COLOR,
+            play_button.move(0, 5),
+            border_radius=12,
+        )
+        pygame.draw.rect(self.screen, HOME_WOOD_COLOR, play_button, border_radius=12)
+        pygame.draw.rect(
+            self.screen,
+            HOME_GOLD_COLOR,
+            play_button,
+            4,
+            border_radius=12,
+        )
+        play_label = self.home_heading_font.render("PLAY", True, TEXT_COLOR)
+        self.screen.blit(play_label, play_label.get_rect(center=play_button.center))
+
+        if (
+            self.home_dragged_card_index is not None
+            and self.home_drag_position is not None
+        ):
+            drag_rectangle = pygame.Rect(0, 0, 94, 66)
+            drag_rectangle.center = self.home_drag_position
+            self.draw_home_card(
+                CARD_CATALOG[self.home_dragged_card_index],
+                drag_rectangle,
+                dragging=True,
+            )
+
     def draw_arena(self) -> None:
         """Draw the grass, river, grid, and bridges.
 
@@ -2691,7 +3024,7 @@ class ArenaViewer:
             self.draw_match_over()
 
     def draw_match_over(self) -> None:
-        """Show the winner, final score, and Play Again action."""
+        """Show the winner, final score, rematch, and Home actions."""
         title_text, score_text = self.match_result_text()
         title_color = (
             BLUE_TEAM_LIGHT_COLOR
@@ -2702,7 +3035,8 @@ class ArenaViewer:
         )
         title = self.match_over_font.render(title_text, True, title_color)
         score = self.font.render(score_text, True, TEXT_COLOR)
-        button_label = self.font.render("PLAY AGAIN", True, TEXT_COLOR)
+        play_again_label = self.font.render("PLAY AGAIN", True, TEXT_COLOR)
+        home_label = self.font.render("HOME", True, TEXT_COLOR)
 
         # Dim only the battlefield; the permanent HUD and stadium counters stay
         # visible behind the final result.
@@ -2745,8 +3079,27 @@ class ArenaViewer:
             border_radius=9,
         )
         self.screen.blit(
-            button_label,
-            button_label.get_rect(center=button.center),
+            play_again_label,
+            play_again_label.get_rect(center=button.center),
+        )
+
+        home_button = self.match_home_button_rectangle()
+        pygame.draw.rect(
+            self.screen,
+            HOME_WOOD_COLOR,
+            home_button,
+            border_radius=9,
+        )
+        pygame.draw.rect(
+            self.screen,
+            HOME_GOLD_COLOR,
+            home_button,
+            3,
+            border_radius=9,
+        )
+        self.screen.blit(
+            home_label,
+            home_label.get_rect(center=home_button.center),
         )
 
     def draw_crown_scores(self) -> None:
@@ -3396,6 +3749,16 @@ class ArenaViewer:
         The arena is drawn first. Highlights, towers, and game information are
         drawn afterward so they appear on top.
         """
+        if self.screen_state == "home":
+            self.draw_home_screen()
+            pygame.transform.smoothscale(
+                self.screen,
+                (WINDOW_WIDTH, WINDOW_HEIGHT),
+                self.display_surface,
+            )
+            pygame.display.flip()
+            return
+
         self.draw_arena()
         self.draw_restricted_placement_tiles()
         self.draw_towers()
@@ -3434,6 +3797,12 @@ class ArenaViewer:
         while self.running:
             frame_ms = self.clock.tick(FPS)
             self.handle_events()
+
+            if self.screen_state == "home":
+                # Time on the menu must not build up into battle updates.
+                self.fixed_timestep.reset()
+                self.draw()
+                continue
 
             # A finished match remains visible and responsive to quit input,
             # but combat, Elixir generation, and the match clock are frozen.
