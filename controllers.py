@@ -117,7 +117,9 @@ class ScriptedController(PlayerController):
         priority = {
             "win_condition": 0,
             "ranged_support": 1,
+            "splash_support": 1,
             "flying_swarm": 2,
+            "ground_swarm": 2,
             "tank_killer": 2,
             "defensive_building": 3,
             "mini_tank": 3,

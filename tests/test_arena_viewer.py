@@ -187,15 +187,15 @@ def test_default_deck_has_explicit_behavior_categories() -> None:
             "melee",
             1,
         ),
-        "Archers": (
+        "Wizard": (
             "troop",
-            "ranged_support",
+            "splash_support",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
             "air_and_ground",
             "ground",
             "ranged",
-            2,
+            1,
         ),
         "Giant": (
             "troop",
@@ -237,15 +237,15 @@ def test_default_deck_has_explicit_behavior_categories() -> None:
             "melee",
             3,
         ),
-        "Skeletons": (
+        "Skeleton Army": (
             "troop",
-            "cycle_swarm",
+            "ground_swarm",
             PlacementRule.FRIENDLY_TERRITORY,
             "nearest_enemy",
             "ground",
             "ground",
             "melee",
-            3,
+            15,
         ),
         "Zap": (
             "spell",
@@ -286,7 +286,12 @@ def test_catalog_and_default_deck_cover_core_gameplay_types() -> None:
         for card in DEFAULT_DECK
         if card.card_type == "troop"
     } == {"ground", "air"}
-    assert {"Mini P.E.K.K.A", "Musketeer"} <= {
+    assert {
+        "Mini P.E.K.K.A",
+        "Musketeer",
+        "Skeleton Army",
+        "Wizard",
+    } <= {
         card.name for card in CARD_CATALOG
     }
 
@@ -298,6 +303,29 @@ def test_fireball_and_zap_have_current_damage_radii() -> None:
     assert cards["Fireball"].spell_stats.radius == 2.5
     assert cards["Zap"].spell_stats is not None
     assert cards["Zap"].spell_stats.radius == 2.5
+
+
+def test_wizard_and_skeleton_army_have_current_level_11_stats() -> None:
+    cards = {card.name: card for card in CARD_CATALOG}
+    wizard = cards["Wizard"]
+    skeleton_army = cards["Skeleton Army"]
+
+    assert wizard.elixir_cost == 5
+    assert wizard.unit_stats is not None
+    assert wizard.unit_stats.max_health == 755
+    assert wizard.unit_stats.damage == 281
+    assert wizard.unit_stats.hit_speed == 1.4
+    assert wizard.unit_stats.attack_range == 5.5
+    assert wizard.unit_stats.attack_splash_radius == 1.5
+    assert wizard.target_types == "air_and_ground"
+
+    assert skeleton_army.elixir_cost == 3
+    assert skeleton_army.unit_count == 15
+    assert skeleton_army.unit_stats is not None
+    assert skeleton_army.unit_stats.max_health == 81
+    assert skeleton_army.unit_stats.damage == 81
+    assert skeleton_army.unit_stats.hit_speed == 1.1
+    assert skeleton_army.unit_stats.attack_range == 0.5
 
 
 def test_played_card_moves_to_back_and_next_card_fills_same_slot() -> None:
