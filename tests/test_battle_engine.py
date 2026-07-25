@@ -122,6 +122,65 @@ def test_cannon_is_stationary_and_targets_ground_but_not_air() -> None:
     assert cannon.target_id == knight.entity_id
 
 
+def test_cannon_loses_health_and_expires_after_thirty_seconds() -> None:
+    engine = make_engine()
+    cannon = engine.deploy_card(
+        card_named("Cannon"),
+        "blue",
+        (LEFT_LANE_X, 520),
+    )[0]
+
+    assert cannon.lifetime_seconds == 30.0
+    assert cannon.lifetime_elapsed == 0.0
+
+    engine.update(15.0)
+
+    assert cannon.health == pytest.approx(cannon.max_health / 2)
+    assert cannon.lifetime_elapsed == pytest.approx(15.0)
+    assert cannon.is_alive
+
+    engine.update(14.95)
+    assert cannon.is_alive
+
+    engine.update(0.05)
+
+    assert cannon.health == 0
+    assert cannon.lifetime_elapsed == pytest.approx(30.0)
+    assert cannon.state is EntityState.DEAD
+
+
+def test_combat_damage_makes_building_expire_before_full_lifetime() -> None:
+    engine = make_engine()
+    cannon = engine.deploy_card(
+        card_named("Cannon"),
+        "blue",
+        (LEFT_LANE_X, 520),
+    )[0]
+
+    cannon.take_damage(100)
+    engine.update(27.0)
+
+    assert not cannon.is_alive
+    assert cannon.lifetime_elapsed < cannon.lifetime_seconds
+
+
+def test_crown_towers_do_not_lose_health_over_time() -> None:
+    engine = make_engine()
+    starting_health = {
+        entity.entity_id: entity.health
+        for entity in engine.entities
+        if entity.tower_kind is not None
+    }
+
+    engine.update(30.0)
+
+    assert {
+        entity.entity_id: entity.health
+        for entity in engine.entities
+        if entity.tower_kind is not None
+    } == starting_health
+
+
 def test_flying_units_cross_the_river_without_using_a_bridge() -> None:
     engine = make_engine()
     minion = engine.deploy_card(
@@ -947,8 +1006,11 @@ def test_every_default_card_has_complete_combat_stats() -> None:
             assert card.unit_stats.hit_speed > 0
             if card.card_type == "building":
                 assert card.unit_stats.movement_speed == 0
+                assert card.unit_stats.lifetime_seconds is not None
+                assert card.unit_stats.lifetime_seconds > 0
             else:
                 assert card.unit_stats.movement_speed > 0
+                assert card.unit_stats.lifetime_seconds is None
             assert card.unit_stats.body_radius > 0
             assert card.unit_stats.mass > 0
             assert 0 <= card.unit_stats.knockback_resistance <= 1

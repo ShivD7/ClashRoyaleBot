@@ -37,6 +37,8 @@ class UnitStats:
     body_radius: float = 9.0
     mass: float = 1.0
     knockback_resistance: float = 0.0
+    # Troops use ``None``. Deployed buildings must provide a positive lifetime.
+    lifetime_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,9 @@ class BattleEntity:
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_remaining: float = 0.0
+    # Only deployed buildings use these fields. Crown Towers never expire.
+    lifetime_seconds: float | None = None
+    lifetime_elapsed: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -362,6 +367,16 @@ class BattleEngine:
         stats = card.unit_stats
         if stats is None:
             raise ValueError(f"Troop card {card.name} has no unit statistics")
+        if (
+            card.card_type == "building"
+            and (
+                stats.lifetime_seconds is None
+                or stats.lifetime_seconds <= 0
+            )
+        ):
+            raise ValueError(
+                f"Building card {card.name} must have a positive lifetime",
+            )
 
         suffix = f" {index + 1}" if card.unit_count > 1 else ""
         entity = BattleEntity(
@@ -390,6 +405,11 @@ class BattleEngine:
                 else stats.knockback_resistance
             ),
             is_building=card.card_type == "building",
+            lifetime_seconds=(
+                stats.lifetime_seconds
+                if card.card_type == "building"
+                else None
+            ),
         )
         self.entities.append(entity)
         return entity
@@ -461,6 +481,7 @@ class BattleEngine:
             return
 
         self._activate_king_towers()
+        self._decay_deployed_buildings(delta_seconds)
         movement_displacements: dict[int, pygame.Vector2] = {}
 
         # Decide every entity's action before changing any position. Movement
@@ -535,6 +556,26 @@ class BattleEngine:
             self._apply_movement(movement_displacements)
             self._update_projectiles(delta_seconds)
         self._activate_king_towers()
+
+    def _decay_deployed_buildings(self, delta_seconds: float) -> None:
+        """Drain building health steadily and expire each at its time limit."""
+        for building in self.living_entities:
+            lifetime = building.lifetime_seconds
+            if not building.is_building or lifetime is None:
+                continue
+
+            remaining = max(0.0, lifetime - building.lifetime_elapsed)
+            active_time = min(delta_seconds, remaining)
+            if active_time > 0:
+                building.lifetime_elapsed += active_time
+                building.take_damage(
+                    building.max_health * active_time / lifetime,
+                )
+
+            # Repeated decimal updates can leave a tiny health fraction. Force
+            # the building to zero when its full lifetime has passed.
+            if building.lifetime_elapsed >= lifetime and building.is_alive:
+                building.take_damage(building.health)
 
     def _acquire_target(self, entity: BattleEntity) -> BattleEntity | None:
         """Choose a visible enemy, falling back to the nearest Crown Tower."""

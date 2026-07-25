@@ -614,6 +614,7 @@ CARD_CATALOG = (
             body_radius=14.0,
             mass=1000.0,
             knockback_resistance=1.0,
+            lifetime_seconds=30.0,
         ),
         None,
     ),
