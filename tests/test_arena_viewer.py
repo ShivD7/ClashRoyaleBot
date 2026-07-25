@@ -1,3 +1,10 @@
+"""Tests for screen geometry, match flow, cards, Elixir, and the home screen.
+
+These tests usually build only the smallest state needed for one rule. That is
+why some tests create ``ArenaViewer`` with ``__new__`` instead of opening a real
+Pygame window. The goal is to test rules quickly without drawing frames.
+"""
+
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +52,9 @@ from arena_viewer import (
 from battle_engine import BattleEngine
 
 
+# ---------------------------------------------------------------------------
+# Logical pixels, window scaling, tiles, and arena layout
+# ---------------------------------------------------------------------------
 def test_screen_positions_convert_to_expected_tiles() -> None:
     assert ArenaViewer.screen_to_tile((ARENA_LEFT, 0)) == (0, 0)
     assert ArenaViewer.screen_to_tile((ARENA_LEFT + 24, 24)) == (0, 0)
@@ -101,6 +111,8 @@ def test_arena_height_matches_all_grid_rows() -> None:
     assert SCREEN_HEIGHT == ARENA_HEIGHT + HUD_HEIGHT
 
 
+# The next layout tests protect the mirrored tower and bridge arrangement. A
+# small coordinate change should not silently make one team travel farther.
 def test_each_team_has_two_princess_towers_and_one_king_tower() -> None:
     for team in ("red", "blue"):
         team_towers = [tower for tower in TOWERS if tower.team == team]
@@ -167,6 +179,9 @@ def test_ground_units_can_cross_only_at_bridges() -> None:
     assert ArenaViewer.is_walkable_position((SCREEN_WIDTH // 2, river.top - 1))
 
 
+# ---------------------------------------------------------------------------
+# Card definitions, catalog coverage, and the eight-card cycle
+# ---------------------------------------------------------------------------
 def test_card_cycle_starts_with_four_cards_and_a_next_card() -> None:
     cycle = CardCycle(DEFAULT_DECK)
 
@@ -396,6 +411,11 @@ def test_card_cycle_requires_exactly_eight_cards() -> None:
         CardCycle(DEFAULT_DECK[:7])
 
 
+# ---------------------------------------------------------------------------
+# Terrain and live placement restrictions
+# ---------------------------------------------------------------------------
+# These tests compare the visual restriction rules with BattleEngine collision
+# checks. A rejected play must never spend Elixir or move the card cycle.
 def test_deployment_tiles_are_only_allowed_before_blue_bridges() -> None:
     first_player_row = (RIVER_TOP + RIVER_HEIGHT) // TILE_SIZE
 
@@ -596,6 +616,9 @@ def test_live_destroyed_tower_immediately_updates_ground_card_placement() -> Non
     assert viewer.try_play_selected_card(unlocked_left_tile)
 
 
+# ---------------------------------------------------------------------------
+# Match completion, reset, and card-playing transactions
+# ---------------------------------------------------------------------------
 def test_king_tower_winner_finishes_viewer_and_clears_card_interaction() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.match_finished = False
@@ -754,6 +777,9 @@ def test_successful_deployment_spends_elixir_records_and_cycles() -> None:
     assert viewer.selected_card_index is None
 
 
+# ---------------------------------------------------------------------------
+# Human selection, drag-and-drop, and spell previews
+# ---------------------------------------------------------------------------
 def test_dragging_card_to_valid_tile_deploys_and_clears_drag_state() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.selected_card_index = None
@@ -832,6 +858,11 @@ def test_dragging_card_to_restricted_tile_does_not_spend_elixir() -> None:
     assert viewer.dragged_card_index is None
 
 
+# ---------------------------------------------------------------------------
+# Fixed timestep and the three-minute match clock
+# ---------------------------------------------------------------------------
+# Frame times may vary, but these tests ensure the saved accumulator always
+# produces exact 50 ms simulation steps.
 def test_river_is_centered_vertically() -> None:
     river = ArenaViewer.river_rectangle()
 
@@ -917,6 +948,9 @@ def test_simulation_update_uses_exact_fixed_step() -> None:
     assert viewer.simulation_now_ms() == 1_000 + FIXED_TIMESTEP_MS
 
 
+# ---------------------------------------------------------------------------
+# Overtime, sudden death, and the final tiebreaker drain
+# ---------------------------------------------------------------------------
 def test_tied_regulation_score_starts_two_minute_overtime() -> None:
     viewer = make_match_state_viewer(red_crowns=1, blue_crowns=1)
 
@@ -1046,6 +1080,9 @@ def test_match_timer_uses_minutes_and_zero_padded_seconds() -> None:
     assert format_match_time(0) == "0:00"
 
 
+# ---------------------------------------------------------------------------
+# Elixir generation, spending, and speed-change notices
+# ---------------------------------------------------------------------------
 def test_elixir_starts_at_five_and_generates_continuously() -> None:
     meter = ElixirMeter()
 
@@ -1145,6 +1182,9 @@ def test_elixir_can_only_be_spent_when_affordable() -> None:
     assert meter.amount == pytest.approx(0.5)
 
 
+# ---------------------------------------------------------------------------
+# Home-screen deck building and state kept between games
+# ---------------------------------------------------------------------------
 def test_home_screen_shows_only_cards_that_are_not_in_the_deck() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.selected_deck = list(DEFAULT_DECK)

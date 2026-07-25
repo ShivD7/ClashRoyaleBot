@@ -3,6 +3,14 @@
 Controllers may request actions, but they never mutate the match. The match
 remains responsible for validating placement, spending Elixir, cycling cards,
 and spawning entities, which prevents every controller type from cheating.
+
+How controller decisions flow
+-----------------------------
+The viewer builds a read-only ``ControllerContext`` from current match state.
+It then calls ``choose_action``. A controller may return one ``PlayCardAction``
+or return ``None`` to wait. The viewer validates returned actions through the
+same rules used for mouse input. This means random, scripted, fixed, and future
+learned controllers all use one safe interface.
 """
 
 from __future__ import annotations
@@ -13,6 +21,11 @@ import random
 from typing import Callable, Sequence
 
 
+# ---------------------------------------------------------------------------
+# The small public interface shared by every controller
+# ---------------------------------------------------------------------------
+# Frozen dataclasses make it harder for a controller to accidentally modify the
+# match. They contain descriptions and requested coordinates, not live objects.
 @dataclass(frozen=True)
 class PlayCardAction:
     """Request that one hand slot be deployed on one arena tile."""
@@ -72,9 +85,15 @@ class HumanController(PlayerController):
         self,
         context: ControllerContext,
     ) -> PlayCardAction | None:
+        # Human actions arrive separately through Pygame events in the viewer.
         return None
 
 
+# ---------------------------------------------------------------------------
+# Built-in computer-controlled players
+# ---------------------------------------------------------------------------
+# These controllers are useful at different stages: Random is a basic baseline,
+# Scripted produces understandable lane pushes, and Fixed repeats a curriculum.
 class RandomController(PlayerController):
     """Random legal-action baseline useful for smoke tests and evaluation."""
 
@@ -89,6 +108,8 @@ class RandomController(PlayerController):
         self,
         context: ControllerContext,
     ) -> PlayCardAction | None:
+        # Waiting some decisions produces a more realistic baseline than playing
+        # a card on every possible controller update.
         if not context.legal_actions:
             return None
         if self._random.random() > self.play_probability:
@@ -114,6 +135,8 @@ class ScriptedController(PlayerController):
         if not context.legal_actions or context.elixir < 3:
             return None
 
+        # Smaller numbers are preferred. Win conditions begin a push, support
+        # follows, and spells are saved until no preferred troop is available.
         priority = {
             "win_condition": 0,
             "fast_win_condition": 0,
@@ -142,6 +165,8 @@ class ScriptedController(PlayerController):
             "large_spell": 5,
             "small_spell": 6,
         }
+        # legal_actions already excludes unaffordable and blocked placements.
+        # Reduce it to hand slots first so card choice and tile choice stay clear.
         affordable_slots = {
             action.hand_slot
             for action in context.legal_actions
@@ -158,6 +183,8 @@ class ScriptedController(PlayerController):
             for action in context.legal_actions
             if action.hand_slot == slot
         ]
+        # After choosing a card, place it as close as possible to the desired
+        # lane and deployment row. Alternate lanes after every successful play.
         desired_column = 4 if self.preferred_lane == 0 else 13
         desired_row = 15 if context.team == "blue" else 14
         action = min(
@@ -197,6 +224,8 @@ class FixedSequenceController(PlayerController):
         self,
         context: ControllerContext,
     ) -> PlayCardAction | None:
+        # Do not skip a scheduled entry. Wait until its time has arrived, its
+        # named card is in hand, and its exact tile appears in legal_actions.
         if self.next_index >= len(self.sequence):
             return None
         scheduled = self.sequence[self.next_index]
@@ -227,6 +256,11 @@ class FixedSequenceController(PlayerController):
 Policy = Callable[[ControllerContext], PlayCardAction | None]
 
 
+# ---------------------------------------------------------------------------
+# Learned-policy adapter and controller factory
+# ---------------------------------------------------------------------------
+# RLController does not choose a machine-learning library. Training code injects
+# any callable with the Policy shape, keeping this simulator framework-neutral.
 class RLController(PlayerController):
     """Adapter for a future learned policy with the same action contract."""
 
@@ -268,6 +302,8 @@ def create_controller(name: str, team: str = "blue") -> PlayerController:
             f"Unknown controller {name!r}; choose one of: {choices}",
         ) from error
     if controller_type is FixedSequenceController:
+        # Mirror the fixed curriculum vertically so the same idea works for
+        # either team. Rows nearer each team's own towers are used for deployment.
         deployment_row = 25 if team == "blue" else 6
         return FixedSequenceController(
             (

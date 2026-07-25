@@ -1,3 +1,10 @@
+"""Tests for controller construction, legal actions, and decision isolation.
+
+The important boundary is that controllers may request actions but cannot
+directly spend Elixir, cycle a hand, or spawn a unit. These tests build a small
+viewer state and verify that all controller types stay behind that boundary.
+"""
+
 import pytest
 
 from arena_viewer import (
@@ -38,6 +45,9 @@ def make_controller_viewer() -> ArenaViewer:
     return viewer
 
 
+# ---------------------------------------------------------------------------
+# Controller registration and command-line selection
+# ---------------------------------------------------------------------------
 def test_all_controller_types_are_registered_and_constructible() -> None:
     assert controller_names() == (
         "human",
@@ -67,6 +77,9 @@ def test_command_line_selects_controllers_without_code_changes() -> None:
     assert settings.red_controller == "fixed"
 
 
+# ---------------------------------------------------------------------------
+# Independent player state and authoritative legal-action generation
+# ---------------------------------------------------------------------------
 def test_blue_and_red_have_independent_hands_and_elixir() -> None:
     viewer = make_controller_viewer()
 
@@ -106,6 +119,9 @@ def test_controller_legal_actions_exclude_occupied_tower_tiles() -> None:
     assert viewer.players["blue"].elixir.amount == 5
 
 
+# ---------------------------------------------------------------------------
+# Controller decisions inside the fixed-step match loop
+# ---------------------------------------------------------------------------
 def test_scripted_controller_only_returns_a_legal_action() -> None:
     viewer = make_controller_viewer()
     context = viewer.controller_context("red")
@@ -154,6 +170,9 @@ def test_fixed_simulation_step_updates_both_players_and_controllers() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Learned-policy adapter
+# ---------------------------------------------------------------------------
 def test_rl_controller_uses_injected_policy_without_mutating_match() -> None:
     expected = PlayCardAction(0, (4, 25))
     policy_calls = []

@@ -10,6 +10,24 @@ This file is split into five main parts:
 
 For each screen frame, the game checks input, runs any ready 50-millisecond
 game updates, and redraws the screen.
+
+How this file fits into the project
+-----------------------------------
+``arena_viewer.py`` is the top-level coordinator. It connects three different
+kinds of work that should not be mixed together:
+
+* Pygame reads the keyboard and mouse and draws the current screen.
+* ``BattleEngine`` owns troops, towers, movement, attacks, and damage.
+* Controllers choose an action, but this file checks whether it is legal.
+
+The main loop near the bottom follows the same order every frame: read input,
+advance the match in fixed time steps, and draw the latest state. The home
+screen skips the battle update and only draws the deck builder.
+
+Most positions in this file use *logical pixels*. The complete game is drawn
+at ``SCREEN_WIDTH`` by ``SCREEN_HEIGHT`` first. That finished image is then
+shrunk to the desktop window. Mouse positions are changed back into logical
+pixels before hit testing, so scaling does not change the game rules.
 """
 
 from __future__ import annotations
@@ -414,6 +432,15 @@ class FixedTimestepClock:
         self.waiting_ms = 0
 
 
+# ---------------------------------------------------------------------------
+# Card collection and card definitions
+# ---------------------------------------------------------------------------
+# The catalog is the complete set of cards this simulator knows about. A deck
+# chooses exactly eight of them. Card objects contain permanent rules and stats;
+# they do not contain changing match data such as current health or position.
+# Playing a card gives its definition to BattleEngine, which creates temporary
+# BattleEntity objects for the current match.
+#
 # The catalog can grow beyond eight cards while an individual battle deck
 # remains exactly eight cards. This makes future deck-building possible without
 # coupling the complete card collection to CardCycle.
@@ -1097,7 +1124,12 @@ class ArenaViewer:
         blue_controller: str | PlayerController = "human",
         red_controller: str | PlayerController = "scripted",
     ) -> None:
-        """Set up Pygame and create the starting game data."""
+        """Set up Pygame and create the starting game data.
+
+        Startup creates both menu state and a complete battle state. The battle
+        does not advance while ``screen_state`` is ``home``. Pressing Play calls
+        ``reset_match`` so changing combat values start fresh at that moment.
+        """
         pygame.init()
         pygame.display.set_caption("Royale Simulator - Grid Arena")
 
@@ -1140,6 +1172,8 @@ class ArenaViewer:
         # Drag state is separate from selection so click-to-place still works.
         self.dragged_card_index: int | None = None
         self.drag_position: tuple[int, int] | None = None
+        # Controllers are created once from the command-line choices. They
+        # survive screen changes, while reset() clears their short-term memory.
         self.controllers = {
             "blue": (
                 create_controller(blue_controller, "blue")
@@ -1152,6 +1186,8 @@ class ArenaViewer:
                 else red_controller
             ),
         }
+        # Mouse and keyboard controls belong to the first human side. If both
+        # sides are AI controlled, blue is the side shown as the local player.
         self.local_team = next(
             (
                 team
@@ -1165,6 +1201,8 @@ class ArenaViewer:
         self.screen_state = "home"
         self.home_dragged_card_index: int | None = None
         self.home_drag_position: tuple[int, int] | None = None
+        # PlayerState owns a side's hand, queue, and Elixir. Troops and towers
+        # live separately inside BattleEngine.
         self.players = self.create_player_states()
         self.sync_local_player_aliases()
         self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
@@ -1208,6 +1246,12 @@ class ArenaViewer:
                 for tower in TOWERS
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Match creation, reset, and screen changes
+    # ------------------------------------------------------------------
+    # Controllers and the selected deck survive between games. Entities,
+    # hands, Elixir, timers, notices, and selections restart for every game.
 
     def create_player_states(self) -> dict[str, PlayerState]:
         """Create independent match state and give the local side its deck."""
@@ -1360,8 +1404,10 @@ class ArenaViewer:
         return title, score
 
     # ------------------------------------------------------------------
-    # Position and movement helpers
+    # Coordinate conversion and arena geometry
     # ------------------------------------------------------------------
+    # Drawing, mouse input, placement, and combat must agree about every tile.
+    # These helpers are the one shared source for that coordinate math.
     @staticmethod
     def display_to_logical_position(
         position: tuple[int, int],
@@ -1569,6 +1615,10 @@ class ArenaViewer:
         }
         return frozenset(destroyed_lanes)
 
+    # The methods below add current entity footprints to the terrain rules
+    # above. The restricted-tile overlay and an actual play use this same live
+    # check, so the screen cannot advertise a tile that deployment rejects.
+
     def is_valid_live_deployment(
         self,
         tile: tuple[int, int],
@@ -1640,6 +1690,8 @@ class ArenaViewer:
 
     def try_play_selected_card(self, tile: tuple[int, int]) -> bool:
         """Deploy the selected card and cycle only when every rule succeeds."""
+        # Human click-to-place becomes the same PlayCardAction returned by an AI
+        # controller. From this point onward both kinds of player use one path.
         if (
             getattr(self, "match_finished", False)
             or getattr(self, "tiebreaker_active", False)
@@ -1761,6 +1813,13 @@ class ArenaViewer:
             action = controller.choose_action(self.controller_context(team))
             if action is not None:
                 self.try_play_action(team, action)
+
+    # ------------------------------------------------------------------
+    # Match phases and fixed simulation updates
+    # ------------------------------------------------------------------
+    # The match can move through regulation, overtime, tiebreaker, and finished
+    # states. Combat advances in exact 50 ms steps; this group decides when the
+    # phase changes and when normal combat must stop.
 
     def update_match_state(self, now_ms: int | None = None) -> None:
         """Advance regulation, overtime, and tiebreaker phase transitions."""
@@ -1991,6 +2050,8 @@ class ArenaViewer:
         position: tuple[int, int],
     ) -> None:
         """Select a hand card and begin following the pointer with it."""
+        # Dragging alone never spends Elixir. A legal drop later reaches the
+        # same authoritative play method used by clicks and controllers.
         if not 0 <= hand_index < len(self.card_cycle.hand):
             raise IndexError("Hand index must be between 0 and 3")
 
@@ -2053,8 +2114,10 @@ class ArenaViewer:
         return card, self.drag_position, radius_pixels
 
     # ------------------------------------------------------------------
-    # Input
+    # Home-screen and battle input
     # ------------------------------------------------------------------
+    # Home input edits the chosen deck. Battle input edits the current match.
+    # handle_events sends each event to the correct screen before applying it.
     def handle_home_event(self, event: pygame.event.Event) -> None:
         """Handle dragging collection cards and pressing Play."""
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -2184,8 +2247,11 @@ class ArenaViewer:
                     )
 
     # ------------------------------------------------------------------
-    # Draw the arena and buildings
+    # Draw the medieval home screen
     # ------------------------------------------------------------------
+    # These methods use Pygame shapes and fonts, so no image files are needed.
+    # The home screen is rebuilt from selected_deck every frame. A selected card
+    # therefore disappears from the available collection immediately.
     def draw_home_panel(self, rectangle: pygame.Rect) -> None:
         """Draw a raised parchment panel held inside a dark wooden frame."""
         shadow = rectangle.move(5, 6)
@@ -2436,6 +2502,10 @@ class ArenaViewer:
             )
 
         self.draw_bridges()
+
+    # The remaining battlefield methods draw permanent scenery first, changing
+    # combat objects second, and interface information last. Later layers appear
+    # on top of earlier layers. None of these drawing methods changes combat.
 
     def draw_stadium_sidelines(self) -> None:
         """Draw decorative, non-playable stands outside both arena edges."""
@@ -3748,8 +3818,10 @@ class ArenaViewer:
         )
 
     # ------------------------------------------------------------------
-    # Draw frames and run the game
+    # Compose complete frames and run the application
     # ------------------------------------------------------------------
+    # draw() combines Home or Battle layers. run() is the only main loop and
+    # always follows the same order: input, fixed updates, then drawing.
     def draw(self) -> None:
         """Draw one complete frame.
 

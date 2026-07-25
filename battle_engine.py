@@ -3,6 +3,19 @@
 The engine owns mutable battle state but knows nothing about buttons, fonts, or
 card dragging. Keeping it separate from Pygame drawing lets tests advance a
 battle by exact time steps and makes the same engine reusable by an RL agent.
+
+How to read this file
+---------------------
+The small data classes at the top describe stats and changing entities.
+``BattleEngine`` then owns one complete battlefield. Public methods answer
+questions or accept high-level actions such as deploying a card. Private
+methods (their names begin with ``_``) carry out the smaller targeting,
+movement, collision, and attack steps.
+
+One call to ``update`` advances the whole battle by the supplied amount of
+time. It uses a fixed order: update timers, choose targets, plan movement,
+separate overlapping bodies, attack, move projectiles, and activate King
+Towers. Keeping this order stable makes repeated training runs reproducible.
 """
 
 from __future__ import annotations
@@ -14,6 +27,11 @@ from typing import Protocol
 import pygame
 
 
+# ---------------------------------------------------------------------------
+# Shared data shapes
+# ---------------------------------------------------------------------------
+# Stat objects are frozen card templates. BattleEntity and Projectile are the
+# changing objects created from those templates for one running match.
 class EntityState(Enum):
     """The high-level action currently performed by a battle entity."""
 
@@ -202,6 +220,12 @@ class BattleEngine:
         bridge_x_positions: tuple[int, int],
         tower_layout: tuple[tuple[str, str, tuple[int, int]], ...],
     ) -> None:
+        """Create an empty battlefield and place its six starting towers.
+
+        The viewer supplies arena measurements so this engine does not import
+        screen settings. From the two bridge centers, the engine can calculate
+        the playable left and right edges needed by movement and collision.
+        """
         self.tile_size = tile_size
         self.screen_height = screen_height
         self.river_top = river_top
@@ -217,6 +241,12 @@ class BattleEngine:
 
         for tower_kind, team, center in tower_layout:
             self._create_tower(tower_kind, team, center)
+
+    # ------------------------------------------------------------------
+    # Read-only battle results and entity lookup
+    # ------------------------------------------------------------------
+    # These properties summarize existing state. They never advance time or
+    # modify an entity, which makes them safe for UI drawing and controllers.
 
     @property
     def living_entities(self) -> tuple[BattleEntity, ...]:
@@ -296,6 +326,7 @@ class BattleEngine:
         )
 
     def _new_entity_id(self) -> int:
+        """Return an ID that stays unique for this battle."""
         entity_id = self._next_entity_id
         self._next_entity_id += 1
         return entity_id
@@ -386,6 +417,13 @@ class BattleEngine:
             )
 
         return tuple(spawned)
+
+    # ------------------------------------------------------------------
+    # Card deployment, formations, and placement collisions
+    # ------------------------------------------------------------------
+    # A card may create one body, a formation of bodies, a building, or an
+    # immediate spell effect. Placement checks every body before anything is
+    # spawned so a multi-unit card cannot be created partly inside an obstacle.
 
     def _spawn_positions(
         self,
@@ -560,6 +598,12 @@ class BattleEngine:
         self.entities.append(entity)
         return entity
 
+    # ------------------------------------------------------------------
+    # Spells, tiebreaker damage, and the per-step update pipeline
+    # ------------------------------------------------------------------
+    # Spells resolve immediately instead of creating a moving entity. The main
+    # update method then advances every time-based combat system in a fixed order.
+
     def cast_spell(
         self,
         card: CardLike,
@@ -622,7 +666,12 @@ class BattleEngine:
         return frozenset(destroyed_teams)
 
     def update(self, delta_seconds: float) -> None:
-        """Advance a deterministic slice of battle time."""
+        """Advance a deterministic slice of battle time.
+
+        First, every living entity plans against the same starting positions.
+        Planned movement is stored in a dictionary and applied afterward. This
+        prevents an earlier entity in the list from receiving a hidden advantage.
+        """
         if delta_seconds <= 0 or self.winning_team is not None:
             return
 
@@ -755,6 +804,13 @@ class BattleEngine:
                         index,
                     )
                 building.spawn_cooldown += spec.interval_seconds
+
+    # ------------------------------------------------------------------
+    # Target selection
+    # ------------------------------------------------------------------
+    # Targeting first filters enemies by card rules (ground/air and normal/
+    # building-only). Distance and stable entity IDs then choose one result, so
+    # equal-distance situations resolve the same way on every training run.
 
     def _acquire_target(self, entity: BattleEntity) -> BattleEntity | None:
         """Choose a visible enemy, falling back to the nearest Crown Tower."""
@@ -915,6 +971,13 @@ class BattleEngine:
         if not inside_river and not reached_entry_bank:
             return entry
         return exit_point
+
+    # ------------------------------------------------------------------
+    # Bridge routing, steering, movement, and collision solving
+    # ------------------------------------------------------------------
+    # Flying units travel directly. Ground units choose a bridge, steer around
+    # nearby bodies, move together from their shared snapshot, and then resolve
+    # any overlap that remains. Entity IDs supply stable tie-breaking directions.
 
     def _select_bridge(
         self,
@@ -1367,6 +1430,13 @@ class BattleEngine:
         entity.target_id = None
         entity.state = EntityState.RETARGETING
         return True
+
+    # ------------------------------------------------------------------
+    # Attacks, projectiles, splash damage, and King Tower activation
+    # ------------------------------------------------------------------
+    # Melee damage lands immediately. Ranged attacks create a Projectile that
+    # remains locked to its target until impact or target death. Both paths end
+    # in take_damage, which owns death and direct King Tower activation.
 
     def _attack_if_ready(
         self,

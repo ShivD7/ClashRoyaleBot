@@ -1,3 +1,10 @@
+"""Tests for deterministic combat, movement, targeting, and damage.
+
+Every test creates a fresh BattleEngine. Tests deploy only the cards needed for
+one situation, advance exact time amounts, and then inspect entity state. This
+keeps failures tied to one combat rule instead of a full three-minute match.
+"""
+
 import pytest
 
 from arena_viewer import (
@@ -30,9 +37,13 @@ def make_engine() -> BattleEngine:
 
 
 def card_named(name: str):
+    """Find one immutable card definition used to arrange a test battle."""
     return next(card for card in CARD_CATALOG if card.name == name)
 
 
+# ---------------------------------------------------------------------------
+# Target priorities and ground-versus-air rules
+# ---------------------------------------------------------------------------
 def test_giant_ignores_troops_and_locks_nearest_enemy_building() -> None:
     engine = make_engine()
     giant = engine.deploy_card(
@@ -121,6 +132,9 @@ def test_cannon_is_stationary_and_targets_ground_but_not_air() -> None:
     assert cannon.target_id == knight.entity_id
 
 
+# ---------------------------------------------------------------------------
+# Building lifetime, spawner waves, and early destruction
+# ---------------------------------------------------------------------------
 def test_cannon_loses_health_and_expires_after_thirty_seconds() -> None:
     engine = make_engine()
     cannon = engine.deploy_card(
@@ -225,6 +239,9 @@ def test_crown_towers_do_not_lose_health_over_time() -> None:
     } == starting_health
 
 
+# ---------------------------------------------------------------------------
+# Deployment footprints and overlap rules at spawn time
+# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "card_name",
     ("Knight", "Minions", "Cannon"),
@@ -316,6 +333,11 @@ def test_spawn_footprint_must_fit_completely_inside_arena() -> None:
         giant,
         (engine.arena_left + radius, 500),
     )
+
+
+# ---------------------------------------------------------------------------
+# Target locking, sight range, and basic movement speed
+# ---------------------------------------------------------------------------
 def test_flying_units_cross_the_river_without_using_a_bridge() -> None:
     engine = make_engine()
     minion = engine.deploy_card(
@@ -468,6 +490,9 @@ def test_fast_unit_moves_farther_than_slow_unit_in_same_time() -> None:
     assert mini_pekka_start.distance_to(mini_pekka.position) == pytest.approx(37.5)
 
 
+# ---------------------------------------------------------------------------
+# Body collision, mass, avoidance, and deterministic separation
+# ---------------------------------------------------------------------------
 def test_overlapping_ground_units_are_separated_by_body_radius() -> None:
     engine = make_engine()
     first = engine.deploy_card(
@@ -632,6 +657,9 @@ def test_troop_steers_around_stationary_building() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Bridge selection, congestion, and routing around obstacles
+# ---------------------------------------------------------------------------
 def test_selected_bridge_lane_remains_stable_while_crossing() -> None:
     engine = make_engine()
     giant = engine.deploy_card(
@@ -762,6 +790,9 @@ def test_troops_route_around_building_on_last_tile_before_bridge(
         assert all(troop.position.y > river_bottom for troop in troops)
 
 
+# ---------------------------------------------------------------------------
+# Knockback and arena boundary constraints
+# ---------------------------------------------------------------------------
 def test_knockback_interrupts_attack_and_respects_unit_resistance() -> None:
     engine = make_engine()
     knight = engine.deploy_card(
@@ -863,6 +894,9 @@ def test_movement_and_collision_results_are_deterministic() -> None:
     assert run_scenario() == run_scenario()
 
 
+# ---------------------------------------------------------------------------
+# Melee, ranged projectiles, formations, and splash damage
+# ---------------------------------------------------------------------------
 def test_melee_damage_sets_health_to_zero_and_marks_target_dead() -> None:
     engine = make_engine()
     mini_pekka = engine.deploy_card(
@@ -998,6 +1032,9 @@ def test_wizard_splash_uses_impact_radius_without_hitting_distant_enemy() -> Non
     assert distant.health == distant.max_health
 
 
+# ---------------------------------------------------------------------------
+# King Tower activation and terminal battle state
+# ---------------------------------------------------------------------------
 def test_king_tower_activates_after_allied_princess_tower_dies() -> None:
     engine = make_engine()
     red_king = next(
@@ -1097,6 +1134,9 @@ def test_destroyed_king_tower_finishes_and_freezes_the_battle() -> None:
     ) == ()
 
 
+# ---------------------------------------------------------------------------
+# Crown scoring and equal-health tiebreaker damage
+# ---------------------------------------------------------------------------
 def test_crown_scores_track_destroyed_towers_for_both_teams() -> None:
     engine = make_engine()
     red_princesses = [
@@ -1172,6 +1212,9 @@ def test_tiebreaker_drain_stops_exactly_at_first_tower_destruction() -> None:
     assert blue_princess.health == blue_starting_health - 25
 
 
+# ---------------------------------------------------------------------------
+# Spell damage, tower reduction, knockback, and catalog completeness
+# ---------------------------------------------------------------------------
 def test_fireball_uses_reduced_damage_against_crown_towers() -> None:
     engine = make_engine()
     red_princess = next(
