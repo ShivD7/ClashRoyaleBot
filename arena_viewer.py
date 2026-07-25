@@ -1555,6 +1555,9 @@ class ArenaViewer:
         if not 0 <= hand_index < len(self.card_cycle.hand):
             raise IndexError("Hand index must be between 0 and 3")
 
+        # A prior arena click is unrelated to this new drag. Clearing it avoids
+        # leaving a solid tile outline behind on a tower after an invalid drop.
+        self.selected_tile = None
         self.selected_card_index = hand_index
         self.dragged_card_index = hand_index
         self.drag_position = position
@@ -1642,6 +1645,7 @@ class ArenaViewer:
                     and pygame.K_1 <= event.key <= pygame.K_4
                 ):
                     # K_1 maps to list index 0, K_2 to index 1, and so on.
+                    self.selected_tile = None
                     self.selected_card_index = event.key - pygame.K_1
                     self.dragged_card_index = None
                     self.drag_position = None
@@ -2260,7 +2264,10 @@ class ArenaViewer:
                 self.tile_rectangle(hovered_tile).topleft,
             )
 
-        if self.selected_tile is not None:
+        # While a card remains selected, an attempted invalid drop may have
+        # populated selected_tile. The restricted-tile tint and hover preview
+        # already explain placement, so do not draw that stale solid outline.
+        if self.selected_tile is not None and self.selected_card_index is None:
             pygame.draw.rect(
                 self.screen,
                 SELECTED_COLOR,

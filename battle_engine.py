@@ -390,7 +390,9 @@ class BattleEngine:
 
         # Skeleton Army deploys all 15 bodies simultaneously in a scatter
         # formation. A staggered five-by-three group stays centered on the
-        # selected tile without initially overlapping individual hitboxes.
+        # selected tile. Large swarms get a little more breathing room than
+        # two- and three-unit cards so their individual bodies remain readable.
+        swarm_spacing = spacing * 1.25
         columns = min(5, unit_count)
         rows = (unit_count + columns - 1) // columns
         offsets = []
@@ -398,11 +400,11 @@ class BattleEngine:
             row, column = divmod(index, columns)
             row_count = min(columns, unit_count - row * columns)
             row_middle = (row_count - 1) / 2
-            stagger = spacing * 0.5 if row % 2 else 0.0
+            stagger = swarm_spacing * 0.5 if row % 2 else 0.0
             offsets.append(
                 pygame.Vector2(
-                    (column - row_middle) * spacing + stagger,
-                    (row - (rows - 1) / 2) * spacing,
+                    (column - row_middle) * swarm_spacing + stagger,
+                    (row - (rows - 1) / 2) * swarm_spacing,
                 )
             )
         return tuple(offsets)

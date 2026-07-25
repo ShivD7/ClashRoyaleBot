@@ -884,6 +884,15 @@ def test_skeleton_army_spawns_fifteen_units_in_scatter_formation() -> None:
     assert len(army) == 15
     assert len(positions) == 15
     assert len({position[1] for position in positions}) == 3
+    minimum_separation = min(
+        first.position.distance_to(second.position)
+        for index, first in enumerate(army)
+        for second in army[index + 1 :]
+    )
+    ordinary_group_spacing = min(12.0, TILE_SIZE * 0.4)
+    assert minimum_separation == pytest.approx(
+        ordinary_group_spacing * 1.25,
+    )
 
 
 def test_wizard_projectile_splashes_clustered_skeleton_army() -> None:

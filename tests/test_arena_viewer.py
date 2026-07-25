@@ -731,6 +731,20 @@ def test_dragging_card_to_valid_tile_deploys_and_clears_drag_state() -> None:
     assert viewer.drag_position is None
 
 
+def test_beginning_card_drag_clears_previous_tile_outline() -> None:
+    viewer = ArenaViewer.__new__(ArenaViewer)
+    viewer.card_cycle = CardCycle(DEFAULT_DECK)
+    viewer.selected_tile = (4, 20)
+    viewer.selected_card_index = None
+    viewer.dragged_card_index = None
+    viewer.drag_position = None
+
+    viewer.begin_card_drag(1, (150, 700))
+
+    assert viewer.selected_tile is None
+    assert viewer.selected_card_index == 1
+
+
 def test_dragged_spell_preview_converts_tile_radius_to_pixels() -> None:
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.card_cycle = CardCycle(DEFAULT_DECK)
