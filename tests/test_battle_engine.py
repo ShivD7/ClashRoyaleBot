@@ -469,13 +469,49 @@ def test_fast_unit_moves_farther_than_slow_unit_in_same_time() -> None:
 
 
 @pytest.mark.parametrize(
-    ("team", "start_tile"),
+    ("team", "start_tile", "landing_x"),
     (
-        ("blue", (0, 17)),
-        ("red", (0, 14)),
+        ("blue", (0, 17), 107),
+        ("blue", (17, 17), 482),
+        ("red", (0, 14), 107),
+        ("red", (17, 14), 482),
     ),
 )
-def test_hog_rider_at_far_left_approaches_bridge_without_teleporting(
+def test_hog_rider_outer_tile_jumps_diagonally_without_teleporting(
+    team: str,
+    start_tile: tuple[int, int],
+    landing_x: int,
+) -> None:
+    engine = make_engine()
+    hog = engine.deploy_card(
+        card_named("Hog Rider"),
+        team,
+        ArenaViewer.tile_rectangle(start_tile).center,
+    )[0]
+    timestep = 0.05
+    expected_landing_y = (
+        RIVER_TOP - hog.radius
+        if team == "blue"
+        else RIVER_TOP + RIVER_HEIGHT + hog.radius
+    )
+
+    for _ in range(40):
+        previous_position = hog.position.copy()
+        engine.update(timestep)
+
+        assert previous_position.distance_to(hog.position) <= (
+            hog.movement_speed * timestep + 1e-6
+        )
+        if not hog.is_jumping:
+            break
+
+    assert not hog.is_jumping
+    assert hog.position.x == pytest.approx(landing_x)
+    assert hog.position.y == pytest.approx(expected_landing_y)
+
+
+@pytest.mark.parametrize(("team", "start_tile"), (("blue", (1, 17)), ("red", (1, 14))))
+def test_hog_rider_one_tile_in_uses_the_bridge(
     team: str,
     start_tile: tuple[int, int],
 ) -> None:
@@ -485,19 +521,49 @@ def test_hog_rider_at_far_left_approaches_bridge_without_teleporting(
         team,
         ArenaViewer.tile_rectangle(start_tile).center,
     )[0]
-    timestep = 0.05
-    starting_x = hog.position.x
 
-    for _ in range(20):
-        previous_position = hog.position.copy()
-        engine.update(timestep)
+    engine.update(0.05)
 
-        assert previous_position.distance_to(hog.position) <= (
-            hog.movement_speed * timestep + 1e-6
-        )
-
+    assert not hog.is_jumping
     assert hog.lane_x == LEFT_LANE_X
-    assert abs(hog.position.x - hog.lane_x) < abs(starting_x - hog.lane_x)
+
+
+def test_ground_only_troop_cannot_target_hog_rider_mid_jump() -> None:
+    engine = make_engine()
+    hog = engine.deploy_card(
+        card_named("Hog Rider"),
+        "blue",
+        ArenaViewer.tile_rectangle((0, 17)).center,
+    )[0]
+    knight = engine.deploy_card(
+        card_named("Knight"),
+        "red",
+        ArenaViewer.tile_rectangle((0, 13)).center,
+    )[0]
+
+    engine.update(0.05)
+
+    assert hog.is_jumping
+    assert knight.target_id != hog.entity_id
+
+
+def test_air_and_ground_troop_can_target_hog_rider_mid_jump() -> None:
+    engine = make_engine()
+    hog = engine.deploy_card(
+        card_named("Hog Rider"),
+        "blue",
+        ArenaViewer.tile_rectangle((0, 17)).center,
+    )[0]
+    wizard = engine.deploy_card(
+        card_named("Wizard"),
+        "red",
+        ArenaViewer.tile_rectangle((0, 13)).center,
+    )[0]
+
+    engine.update(0.05)
+
+    assert hog.is_jumping
+    assert wizard.target_id == hog.entity_id
 
 
 def test_overlapping_ground_units_are_separated_by_body_radius() -> None:

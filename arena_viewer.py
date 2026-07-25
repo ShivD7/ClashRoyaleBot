@@ -717,6 +717,7 @@ CARD_CATALOG = (
             body_radius=10.0,
             mass=2.5,
             knockback_resistance=0.2,
+            can_jump_river=True,
         ),
         None,
     ),
@@ -2770,14 +2771,20 @@ class ArenaViewer:
         entity: BattleEntity,
         *,
         width: int = 34,
+        center: tuple[int, int] | None = None,
     ) -> None:
         """Draw a compact health bar immediately above one living entity."""
         if not entity.is_alive:
             return
 
         height = 5
-        center_x = round(entity.position.x)
-        top = round(entity.position.y - entity.radius - 12)
+        if center is None:
+            center = (
+                round(entity.position.x),
+                round(entity.position.y),
+            )
+        center_x = center[0]
+        top = round(center[1] - entity.radius - 12)
         background = pygame.Rect(center_x - width // 2, top, width, height)
         ratio = max(0.0, min(1.0, entity.health / entity.max_health))
         remaining_width = round((width - 2) * ratio)
@@ -2818,6 +2825,7 @@ class ArenaViewer:
             "Skeletons": (226, 224, 211),
             "Skeleton Army": (226, 224, 211),
             "Minions": (111, 105, 202),
+            "Hog Rider": (166, 104, 67),
         }
 
         for entity in self.battle.entities:
@@ -2827,7 +2835,19 @@ class ArenaViewer:
             base_name = entity.name.rsplit(" ", 1)[0]
             if base_name not in unit_colors:
                 base_name = entity.name
-            center = (round(entity.position.x), round(entity.position.y))
+            ground_center = (
+                round(entity.position.x),
+                round(entity.position.y),
+            )
+            center = ground_center
+            if entity.is_jumping:
+                arc_height = round(
+                    math.sin(math.pi * entity.jump_progress) * TILE_SIZE,
+                )
+                center = (ground_center[0], ground_center[1] - arc_height)
+                shadow = pygame.Rect(0, 0, 22, 8)
+                shadow.center = ground_center
+                pygame.draw.ellipse(self.screen, (55, 65, 55), shadow)
             team_outline = (
                 BLUE_TEAM_COLOR if entity.team == "blue" else RED_TEAM_COLOR
             )
@@ -2863,7 +2883,7 @@ class ArenaViewer:
             )[:2]
             label = self.card_font.render(initials, True, TOWER_OPENING_COLOR)
             self.screen.blit(label, label.get_rect(center=center))
-            self.draw_health_bar(entity)
+            self.draw_health_bar(entity, center=center)
 
     def draw_deployed_buildings(self) -> None:
         """Draw player-deployed buildings separately from permanent towers."""
