@@ -40,6 +40,7 @@ class UnitStats:
     knockback_resistance: float = 0.0
     # Troops use ``None``. Deployed buildings must provide a positive lifetime.
     lifetime_seconds: float | None = None
+    spawner: SpawnerStats | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,30 @@ class CardLike(Protocol):
     unit_count: int
     unit_stats: UnitStats | None
     spell_stats: SpellStats | None
+
+
+@dataclass(frozen=True)
+class SpawnedCard:
+    """Describe a troop wave created by a spawner building."""
+
+    name: str
+    target_priority: str
+    target_types: str
+    movement_type: str
+    attack_style: str
+    unit_count: int
+    unit_stats: UnitStats
+    card_type: str = "troop"
+    spell_stats: None = None
+
+
+@dataclass(frozen=True)
+class SpawnerStats:
+    """Describe what a building spawns and how often it creates a wave."""
+
+    card: SpawnedCard
+    interval_seconds: float
+    initial_delay_seconds: float
 
 
 @dataclass
@@ -103,6 +128,8 @@ class BattleEntity:
     # Only deployed buildings use these fields. Crown Towers never expire.
     lifetime_seconds: float | None = None
     lifetime_elapsed: float = 0.0
+    spawner: SpawnerStats | None = None
+    spawn_cooldown: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -477,6 +504,13 @@ class BattleEngine:
             raise ValueError(
                 f"Building card {card.name} must have a positive lifetime",
             )
+        if stats.spawner is not None:
+            if card.card_type != "building":
+                raise ValueError("Only building cards can have spawner stats")
+            if stats.spawner.interval_seconds <= 0:
+                raise ValueError("Spawner interval must be positive")
+            if stats.spawner.initial_delay_seconds < 0:
+                raise ValueError("Spawner initial delay cannot be negative")
 
         suffix = f" {index + 1}" if card.unit_count > 1 else ""
         entity = BattleEntity(
@@ -510,6 +544,17 @@ class BattleEngine:
                 stats.lifetime_seconds
                 if card.card_type == "building"
                 else None
+            ),
+            spawner=stats.spawner,
+            spawn_cooldown=(
+                stats.spawner.initial_delay_seconds
+                if stats.spawner is not None
+                else 0.0
+            ),
+            # A zero-damage spawner waits for its waves instead of trying to
+            # attack. It remains alive and can still be targeted normally.
+            active=not (
+                card.card_type == "building" and stats.damage <= 0
             ),
         )
         self.entities.append(entity)
@@ -583,6 +628,7 @@ class BattleEngine:
 
         self._activate_king_towers()
         self._decay_deployed_buildings(delta_seconds)
+        self._update_spawners(delta_seconds)
         movement_displacements: dict[int, pygame.Vector2] = {}
 
         # Decide every entity's action before changing any position. Movement
@@ -677,6 +723,38 @@ class BattleEngine:
             # the building to zero when its full lifetime has passed.
             if building.lifetime_elapsed >= lifetime and building.is_alive:
                 building.take_damage(building.health)
+
+    def _update_spawners(self, delta_seconds: float) -> None:
+        """Create each due troop wave from living spawner buildings."""
+        spawners = tuple(
+            entity
+            for entity in self.living_entities
+            if entity.spawner is not None
+        )
+        for building in spawners:
+            spec = building.spawner
+            if spec is None:
+                continue
+
+            building.spawn_cooldown -= delta_seconds
+            while building.spawn_cooldown <= 1e-9 and building.is_alive:
+                child_radius = spec.card.unit_stats.body_radius
+                forward = -1 if building.team == "blue" else 1
+                spawn_center = (
+                    building.position.x,
+                    building.position.y
+                    + forward * (building.radius + child_radius + 2.0),
+                )
+                for index, position in enumerate(
+                    self._spawn_positions(spec.card, spawn_center),
+                ):
+                    self._spawn_unit(
+                        spec.card,
+                        building.team,
+                        position,
+                        index,
+                    )
+                building.spawn_cooldown += spec.interval_seconds
 
     def _acquire_target(self, entity: BattleEntity) -> BattleEntity | None:
         """Choose a visible enemy, falling back to the nearest Crown Tower."""

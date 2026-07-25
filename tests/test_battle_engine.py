@@ -3,7 +3,6 @@ import pytest
 from arena_viewer import (
     ARENA_HEIGHT,
     CARD_CATALOG,
-    DEFAULT_DECK,
     LEFT_LANE_X,
     RIGHT_LANE_X,
     RIVER_HEIGHT,
@@ -147,6 +146,51 @@ def test_cannon_loses_health_and_expires_after_thirty_seconds() -> None:
     assert cannon.health == 0
     assert cannon.lifetime_elapsed == pytest.approx(30.0)
     assert cannon.state is EntityState.DEAD
+
+
+def test_tombstone_spawns_two_skeletons_every_three_point_three_seconds() -> None:
+    engine = make_engine()
+    tombstone = engine.deploy_card(
+        card_named("Tombstone"),
+        "blue",
+        (LEFT_LANE_X, 520),
+    )[0]
+
+    engine.update(3.25)
+    assert not any(entity.name.startswith("Skeleton ") for entity in engine.entities)
+
+    engine.update(0.05)
+    first_wave = [
+        entity
+        for entity in engine.entities
+        if entity.name.startswith("Skeleton ")
+    ]
+    assert len(first_wave) == 2
+    assert all(entity.team == "blue" for entity in first_wave)
+    assert all(not entity.is_building for entity in first_wave)
+
+    engine.update(3.3)
+    all_spawned = [
+        entity
+        for entity in engine.entities
+        if entity.name.startswith("Skeleton ")
+    ]
+    assert len(all_spawned) == 4
+    assert tombstone.is_alive
+
+
+def test_destroyed_tombstone_stops_spawning_waves() -> None:
+    engine = make_engine()
+    tombstone = engine.deploy_card(
+        card_named("Tombstone"),
+        "blue",
+        (LEFT_LANE_X, 520),
+    )[0]
+    tombstone.take_damage(tombstone.max_health)
+
+    engine.update(10.0)
+
+    assert not any(entity.name.startswith("Skeleton ") for entity in engine.entities)
 
 
 def test_combat_damage_makes_building_expire_before_full_lifetime() -> None:
@@ -1171,16 +1215,21 @@ def test_fireball_knocks_surviving_troop_away_from_blast() -> None:
     assert knight.position.y == pytest.approx(starting_position.y)
 
 
-def test_every_default_card_has_complete_combat_stats() -> None:
-    for card in DEFAULT_DECK:
+def test_every_catalog_card_has_complete_combat_stats() -> None:
+    for card in CARD_CATALOG:
         if card.spell_stats is not None:
             assert card.spell_stats.damage > 0
             assert card.spell_stats.radius > 0
         else:
             assert card.unit_stats is not None
             assert card.unit_stats.max_health > 0
-            assert card.unit_stats.damage > 0
             assert card.unit_stats.hit_speed > 0
+            if card.unit_stats.spawner is None:
+                assert card.unit_stats.damage > 0
+            else:
+                assert card.unit_stats.damage >= 0
+                assert card.unit_stats.spawner.interval_seconds > 0
+                assert card.unit_stats.spawner.card.unit_stats.damage > 0
             if card.card_type == "building":
                 assert card.unit_stats.movement_speed == 0
                 assert card.unit_stats.lifetime_seconds is not None

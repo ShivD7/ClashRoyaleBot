@@ -296,6 +296,50 @@ def test_catalog_and_default_deck_cover_core_gameplay_types() -> None:
     }
 
 
+def test_training_catalog_has_representative_size_and_unique_names() -> None:
+    names = [card.name for card in CARD_CATALOG]
+
+    assert 20 <= len(CARD_CATALOG) <= 30
+    assert len(names) == len(set(names))
+
+
+def test_training_catalog_covers_requested_card_roles() -> None:
+    cards = {card.name: card for card in CARD_CATALOG}
+    expected_groups = {
+        "tanks": {"Giant", "P.E.K.K.A"},
+        "building-targeting win conditions": {
+            "Giant",
+            "Hog Rider",
+            "Balloon",
+        },
+        "melee defenders": {"Knight", "Mini P.E.K.K.A", "Valkyrie"},
+        "ranged support": {"Archers", "Musketeer", "Wizard"},
+        "flying units": {"Minions", "Bats", "Baby Dragon", "Balloon"},
+        "air defense": {"Musketeer", "Mega Minion", "Inferno Tower"},
+        "swarms": {
+            "Skeleton Army",
+            "Goblins",
+            "Spear Goblins",
+            "Bats",
+        },
+        "splash attackers": {"Wizard", "Valkyrie", "Bomber", "Baby Dragon"},
+        "defensive buildings": {"Cannon", "Inferno Tower"},
+        "spawners": {"Tombstone"},
+        "small and large spells": {"Zap", "Arrows", "Fireball", "Rocket"},
+        "fast cycle cards": {"Skeletons", "Ice Spirit", "Bats"},
+    }
+
+    for group, names in expected_groups.items():
+        assert names <= cards.keys(), group
+
+    assert all(
+        cards[name].target_priority == "buildings_only"
+        for name in ("Giant", "Hog Rider", "Balloon")
+    )
+    assert cards["Tombstone"].unit_stats is not None
+    assert cards["Tombstone"].unit_stats.spawner is not None
+
+
 def test_fireball_and_zap_have_current_damage_radii() -> None:
     cards = {card.name: card for card in DEFAULT_DECK}
 
