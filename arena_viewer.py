@@ -333,21 +333,23 @@ class FireballAnimation:
     start: tuple[float, float]
     target: tuple[float, float]
     elapsed: float = 0.0
+    travel_seconds: float = FIREBALL_TRAVEL_SECONDS
+    impact_seconds: float = FIREBALL_IMPACT_SECONDS
 
     @property
     def total_seconds(self) -> float:
         """Return the complete flight plus impact lifetime."""
-        return FIREBALL_TRAVEL_SECONDS + FIREBALL_IMPACT_SECONDS
+        return self.travel_seconds + self.impact_seconds
 
     @property
     def is_traveling(self) -> bool:
         """Return whether the fireball has not reached its target yet."""
-        return self.elapsed < FIREBALL_TRAVEL_SECONDS
+        return self.elapsed < self.travel_seconds
 
     @property
     def travel_progress(self) -> float:
         """Return flight progress clamped between zero and one."""
-        return max(0.0, min(1.0, self.elapsed / FIREBALL_TRAVEL_SECONDS))
+        return max(0.0, min(1.0, self.elapsed / self.travel_seconds))
 
     def position_at(self, progress: float | None = None) -> pygame.Vector2:
         """Return a point along the flight with a raised parabolic arc."""
@@ -579,7 +581,13 @@ CARD_CATALOG = (
         "area",
         0,
         None,
-        SpellStats(688, 207, 2.5, knockback_distance=1.0),
+        SpellStats(
+            688,
+            207,
+            2.5,
+            knockback_distance=1.0,
+            travel_seconds=FIREBALL_TRAVEL_SECONDS,
+        ),
     ),
     Card(
         "Mini P.E.K.K.A",
@@ -1811,7 +1819,16 @@ class ArenaViewer:
 
         self.deployments.append(Deployment(card, action.tile))
         if card.name == "Fireball":
-            self.queue_fireball_animation(team, action.tile)
+            travel_seconds = (
+                card.spell_stats.travel_seconds
+                if card.spell_stats is not None
+                else FIREBALL_TRAVEL_SECONDS
+            )
+            self.queue_fireball_animation(
+                team,
+                action.tile,
+                travel_seconds=travel_seconds,
+            )
         battle = getattr(self, "battle", None)
         if battle is not None:
             battle.deploy_card(
@@ -1826,6 +1843,8 @@ class ArenaViewer:
         self,
         team: str,
         tile: tuple[int, int],
+        *,
+        travel_seconds: float = FIREBALL_TRAVEL_SECONDS,
     ) -> None:
         """Launch a visual Fireball from behind the caster's King Tower."""
         if team not in {"blue", "red"}:
@@ -1840,6 +1859,7 @@ class ArenaViewer:
                 team=team,
                 start=(CENTER_LANE_X, start_y),
                 target=(float(target[0]), float(target[1])),
+                travel_seconds=travel_seconds,
             ),
         )
 
@@ -3289,8 +3309,8 @@ class ArenaViewer:
 
             impact_progress = min(
                 1.0,
-                (animation.elapsed - FIREBALL_TRAVEL_SECONDS)
-                / FIREBALL_IMPACT_SECONDS,
+                (animation.elapsed - animation.travel_seconds)
+                / animation.impact_seconds,
             )
             radius = round(12 + impact_progress * 48)
             alpha = max(0, round(220 * (1.0 - impact_progress)))

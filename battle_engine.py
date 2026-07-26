@@ -75,6 +75,7 @@ class SpellStats:
     radius: float
     knockback_distance: float = 0.0
     stun_duration: float = 0.0
+    travel_seconds: float = 0.0
 
 
 class CardLike(Protocol):
@@ -221,6 +222,16 @@ class Projectile:
     visual_style: str = "shot"
 
 
+@dataclass
+class PendingSpell:
+    """Store a travelling spell until its deterministic impact time."""
+
+    card: CardLike
+    team: str
+    position: tuple[int, int]
+    remaining_seconds: float
+
+
 class BattleEngine:
     """Advance targeting, movement, attacks, projectiles, health, and death."""
 
@@ -269,6 +280,7 @@ class BattleEngine:
         self.arena_right = max(bridge_x_positions) + lane_span / 2
         self.entities: list[BattleEntity] = []
         self.projectiles: list[Projectile] = []
+        self.pending_spells: list[PendingSpell] = []
         self._next_entity_id = 1
         self._next_projectile_id = 1
 
@@ -423,14 +435,29 @@ class BattleEngine:
         team: str,
         position: tuple[int, int],
     ) -> tuple[BattleEntity, ...]:
-        """Spawn all units from a troop card or resolve a spell immediately."""
+        """Spawn units or schedule a spell for its configured impact time."""
         # A destroyed King Tower is a terminal state. Training code and the UI
         # cannot accidentally add actions to a battle that has already ended.
         if self.winning_team is not None:
             return ()
 
         if card.card_type == "spell":
-            self.cast_spell(card, team, position)
+            stats = card.spell_stats
+            if stats is None:
+                raise ValueError(f"Spell card {card.name} has no spell statistics")
+            if stats.travel_seconds < 0:
+                raise ValueError("Spell travel time cannot be negative")
+            if stats.travel_seconds > 0:
+                self.pending_spells.append(
+                    PendingSpell(
+                        card=card,
+                        team=team,
+                        position=position,
+                        remaining_seconds=stats.travel_seconds,
+                    ),
+                )
+            else:
+                self.cast_spell(card, team, position)
             return ()
 
         if card.unit_stats is None:
@@ -648,8 +675,8 @@ class BattleEngine:
     # ------------------------------------------------------------------
     # Spells, tiebreaker damage, and the per-step update pipeline
     # ------------------------------------------------------------------
-    # Spells resolve immediately instead of creating a moving entity. The main
-    # update method then advances every time-based combat system in a fixed order.
+    # Instant spells resolve during deployment. Travelling spells wait in a
+    # deterministic queue and resolve when their configured flight time expires.
 
     def cast_spell(
         self,
@@ -689,6 +716,21 @@ class BattleEngine:
                 )
 
         self._activate_king_towers()
+
+    def _update_pending_spells(self, delta_seconds: float) -> None:
+        """Resolve travelling spells whose fixed impact time has arrived."""
+        waiting = []
+        for pending_spell in self.pending_spells:
+            pending_spell.remaining_seconds -= delta_seconds
+            if pending_spell.remaining_seconds > 1e-9:
+                waiting.append(pending_spell)
+                continue
+            self.cast_spell(
+                pending_spell.card,
+                pending_spell.team,
+                pending_spell.position,
+            )
+        self.pending_spells = waiting
 
     def drain_crown_towers(self, requested_damage: float) -> frozenset[str]:
         """Damage every standing Crown Tower equally for a tiebreaker tick.
@@ -845,6 +887,10 @@ class BattleEngine:
         if self.winning_team is None:
             self._apply_movement(movement_displacements)
             self._update_projectiles(delta_seconds)
+        # A spell whose timer reaches zero lands at the end of this time slice.
+        # Its knockback movement therefore begins on the following update.
+        if self.winning_team is None:
+            self._update_pending_spells(delta_seconds)
         self._activate_king_towers()
 
     def _decay_deployed_buildings(self, delta_seconds: float) -> None:

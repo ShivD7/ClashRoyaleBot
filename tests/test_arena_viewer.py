@@ -381,6 +381,10 @@ def test_fireball_and_zap_have_current_damage_radii() -> None:
 
     assert cards["Fireball"].spell_stats is not None
     assert cards["Fireball"].spell_stats.radius == 2.5
+    assert (
+        cards["Fireball"].spell_stats.travel_seconds
+        == FIREBALL_TRAVEL_SECONDS
+    )
     assert cards["Zap"].spell_stats is not None
     assert cards["Zap"].spell_stats.radius == 2.5
     assert cards["Zap"].spell_stats.stun_duration == 0.5
@@ -789,6 +793,7 @@ def test_fireball_can_be_deployed_in_enemy_territory() -> None:
     animation = viewer.fireball_animations[0]
     assert animation.team == "blue"
     assert animation.start[1] > ARENA_HEIGHT
+    assert animation.travel_seconds == FIREBALL_TRAVEL_SECONDS
     assert animation.target == tuple(
         float(value)
         for value in ArenaViewer.tile_rectangle(enemy_tile).center

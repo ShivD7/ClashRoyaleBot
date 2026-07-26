@@ -1311,11 +1311,17 @@ def test_spell_damage_activates_king_tower_early(
     assert not king.active
     assert all(tower.is_alive for tower in allied_princesses)
 
+    fireball = card_named("Fireball")
     engine.deploy_card(
-        card_named("Fireball"),
+        fireball,
         spell_team,
         (round(king.position.x), round(king.position.y)),
     )
+
+    assert king.health == starting_health
+    assert not king.active
+
+    engine.update(fireball.spell_stats.travel_seconds)
 
     assert king.health < starting_health
     assert king.active
@@ -1330,11 +1336,13 @@ def test_spell_that_misses_king_tower_does_not_activate_it() -> None:
         if entity.team == "red" and entity.tower_kind == "king"
     )
 
+    fireball = card_named("Fireball")
     engine.deploy_card(
-        card_named("Fireball"),
+        fireball,
         "blue",
         (round(red_king.position.x), round(red_king.position.y + 250)),
     )
+    engine.update(fireball.spell_stats.travel_seconds)
 
     assert not red_king.active
 
@@ -1457,13 +1465,22 @@ def test_fireball_uses_reduced_damage_against_crown_towers() -> None:
     )
     starting_health = red_princess.health
 
+    fireball = card_named("Fireball")
     engine.deploy_card(
-        card_named("Fireball"),
+        fireball,
         "blue",
         (round(red_princess.position.x), round(red_princess.position.y)),
     )
 
+    assert red_princess.health == starting_health
+    assert len(engine.pending_spells) == 1
+
+    engine.update(fireball.spell_stats.travel_seconds - 0.05)
+    assert red_princess.health == starting_health
+
+    engine.update(0.05)
     assert red_princess.health == starting_health - 207
+    assert engine.pending_spells == []
 
 
 def test_fireball_knocks_surviving_troop_away_from_blast() -> None:
@@ -1473,20 +1490,34 @@ def test_fireball_knocks_surviving_troop_away_from_blast() -> None:
         "red",
         (LEFT_LANE_X, 500),
     )[0]
+    knight.movement_speed = 0
+    engine.update(0.01)
     starting_position = knight.position.copy()
+    starting_target = knight.target_id
     blast_center = (LEFT_LANE_X - 20, 500)
 
+    fireball = card_named("Fireball")
     engine.deploy_card(
-        card_named("Fireball"),
+        fireball,
         "blue",
         blast_center,
     )
-    assert knight.target_id is None
 
-    engine.update(0.25)
+    engine.update(fireball.spell_stats.travel_seconds - 0.05)
+    assert knight.position == starting_position
+    assert knight.target_id == starting_target
+
+    engine.update(0.05)
+
+    assert knight.position == starting_position
+    assert knight.target_id is None
+    assert knight.knockback_remaining > 0
+
+    engine.update(0.05)
 
     assert knight.position.x > starting_position.x
     assert knight.position.y == pytest.approx(starting_position.y)
+    assert knight.knockback_remaining > 0
 
 
 def test_zap_stuns_only_enemies_in_its_radius_for_half_a_second() -> None:
@@ -1579,6 +1610,7 @@ def test_every_catalog_card_has_complete_combat_stats() -> None:
             assert card.spell_stats.damage > 0
             assert card.spell_stats.radius > 0
             assert card.spell_stats.stun_duration >= 0
+            assert card.spell_stats.travel_seconds >= 0
         else:
             assert card.unit_stats is not None
             assert card.unit_stats.max_health > 0
