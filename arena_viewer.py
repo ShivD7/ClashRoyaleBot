@@ -1259,6 +1259,7 @@ class ArenaViewer:
         self.players = self.create_player_states()
         self.sync_local_player_aliases()
         self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+        self.controller_update_order = ["blue", "red"]
         pygame.display.set_caption(
             "Royale Simulator - "
             f"Blue: {self.controllers['blue'].name} vs "
@@ -1345,6 +1346,7 @@ class ArenaViewer:
         self.players = self.create_player_states()
         self.sync_local_player_aliases()
         self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+        self.controller_update_order = ["blue", "red"]
         for controller in self.controllers.values():
             controller.reset()
         self.fixed_timestep = FixedTimestepClock()
@@ -1928,18 +1930,35 @@ class ArenaViewer:
     def update_controllers(self, delta_seconds: float) -> None:
         """Ask non-human controllers for actions at a bounded decision rate."""
         decision_interval = 0.25
-        for team, controller in self.controllers.items():
-            if isinstance(controller, HumanController):
-                continue
-
+        ready_teams = []
+        for team in ("blue", "red"):
             self.controller_decision_elapsed[team] += delta_seconds
             if self.controller_decision_elapsed[team] < decision_interval:
                 continue
+            ready_teams.append(team)
+
+        if not ready_teams:
+            return
+
+        for team in ready_teams:
             self.controller_decision_elapsed[team] %= decision_interval
+
+        ordered_ready_teams = [
+            team
+            for team in self.controller_update_order
+            if team in ready_teams
+        ]
+        for team in ordered_ready_teams:
+            controller = self.controllers[team]
+            if isinstance(controller, HumanController):
+                continue
 
             action = controller.choose_action(self.controller_context(team))
             if action is not None:
                 self.try_play_action(team, action)
+
+        if len(ready_teams) > 1:
+            self.controller_update_order.reverse()
 
     # ------------------------------------------------------------------
     # Match phases and fixed simulation updates

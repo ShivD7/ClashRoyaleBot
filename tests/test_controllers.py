@@ -27,6 +27,25 @@ from controllers import (
 )
 
 
+class RecordingController:
+    """Minimal non-human controller that records when it was asked to act."""
+
+    def __init__(self, team: str, action_log: list[str]) -> None:
+        self.team = team
+        self.action_log = action_log
+        self.name = f"recording-{team}"
+
+    def choose_action(
+        self,
+        context: ControllerContext,
+    ) -> PlayCardAction | None:
+        self.action_log.append(context.team)
+        return None
+
+    def reset(self) -> None:
+        """No per-match memory is needed for this test helper."""
+
+
 def make_controller_viewer() -> ArenaViewer:
     """Create controller-facing match state without opening a Pygame window."""
     viewer = ArenaViewer.__new__(ArenaViewer)
@@ -39,6 +58,7 @@ def make_controller_viewer() -> ArenaViewer:
         "red": ScriptedController(),
     }
     viewer.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+    viewer.controller_update_order = ["blue", "red"]
     viewer.deployments = []
     viewer.match_elapsed = 0.0
     viewer.match_finished = False
@@ -147,6 +167,21 @@ def test_match_loop_runs_non_human_controller_but_not_human_controller() -> None
         entity.team == "blue" and not entity.is_building
         for entity in viewer.battle.entities
     )
+
+
+def test_controller_order_alternates_when_both_ai_are_ready() -> None:
+    viewer = make_controller_viewer()
+    action_log: list[str] = []
+    viewer.controllers = {
+        "blue": RecordingController("blue", action_log),
+        "red": RecordingController("red", action_log),
+    }
+
+    viewer.update_controllers(0.25)
+    viewer.update_controllers(0.25)
+
+    assert action_log == ["blue", "red", "red", "blue"]
+    assert viewer.controller_update_order == ["blue", "red"]
 
 
 def test_fixed_simulation_step_updates_both_players_and_controllers() -> None:

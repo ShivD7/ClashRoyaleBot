@@ -66,6 +66,35 @@ def test_giant_ignores_troops_and_locks_nearest_enemy_building() -> None:
     assert target.tower_kind == "princess"
 
 
+@pytest.mark.parametrize(
+    ("team", "spawn_y", "enemy_team"),
+    (
+        ("blue", 220, "red"),
+        ("red", ARENA_HEIGHT - 220, "blue"),
+    ),
+)
+def test_equal_distance_tower_ties_resolve_the_same_lane_for_both_sides(
+    team: str,
+    spawn_y: int,
+    enemy_team: str,
+) -> None:
+    engine = make_engine()
+    center_x = (LEFT_LANE_X + RIGHT_LANE_X) // 2
+    giant = engine.deploy_card(
+        card_named("Giant"),
+        team,
+        (center_x, spawn_y),
+    )[0]
+
+    engine.update(0.01)
+
+    target = engine.entity_by_id(giant.target_id)
+    assert target is not None
+    assert target.team == enemy_team
+    assert target.tower_kind == "princess"
+    assert target.position.x == LEFT_LANE_X
+
+
 def test_ground_only_troop_cannot_target_flying_minions() -> None:
     engine = make_engine()
     knight = engine.deploy_card(
@@ -130,6 +159,40 @@ def test_cannon_is_stationary_and_targets_ground_but_not_air() -> None:
     assert cannon.tower_kind is None
     assert cannon.position == starting_position
     assert cannon.target_id == knight.entity_id
+
+
+def test_exact_overlap_knockback_uses_position_instead_of_entity_id() -> None:
+    engine = make_engine()
+    left_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (LEFT_LANE_X, 550),
+    )[0]
+    right_knight = engine.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (RIGHT_LANE_X, 550),
+    )[0]
+    left_start = left_knight.position.copy()
+    right_start = right_knight.position.copy()
+
+    assert engine.apply_knockback(
+        left_knight.entity_id,
+        left_knight.position,
+        distance_tiles=1.0,
+        duration=0.25,
+    )
+    assert engine.apply_knockback(
+        right_knight.entity_id,
+        right_knight.position,
+        distance_tiles=1.0,
+        duration=0.25,
+    )
+
+    engine.update(0.25)
+
+    assert left_knight.position.x < left_start.x
+    assert right_knight.position.x > right_start.x
 
 
 # ---------------------------------------------------------------------------

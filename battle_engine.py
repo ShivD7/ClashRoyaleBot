@@ -968,7 +968,7 @@ class BattleEngine:
                 if distance > maximum:
                     continue
                 visible_candidates.append(
-                    (distance, candidate.entity_id, candidate)
+                    (distance, self._target_tiebreak_key(entity, candidate), candidate)
                 )
                 continue
 
@@ -976,15 +976,16 @@ class BattleEngine:
             sight_distance += entity.radius + candidate.radius
             if distance <= sight_distance:
                 visible_candidates.append(
-                    (distance, candidate.entity_id, candidate)
+                    (distance, self._target_tiebreak_key(entity, candidate), candidate)
                 )
 
             if candidate.tower_kind is not None:
                 crown_tower_candidates.append(
-                    (distance, candidate.entity_id, candidate)
+                    (distance, self._target_tiebreak_key(entity, candidate), candidate)
                 )
 
-        # Entity ID breaks equal-distance ties deterministically.
+        # Geometry-based tie breakers keep mirrored battles fairer than using
+        # creation order or entity IDs.
         if visible_candidates:
             return min(
                 visible_candidates,
@@ -1037,11 +1038,37 @@ class BattleEngine:
             if distance > sight_distance or distance >= current_distance:
                 continue
 
-            candidates.append((distance, candidate.entity_id, candidate))
+            candidates.append(
+                (distance, self._target_tiebreak_key(entity, candidate), candidate),
+            )
 
         if not candidates:
             return None
         return min(candidates, key=lambda item: (item[0], item[1]))[2]
+
+    def _target_tiebreak_key(
+        self,
+        entity: BattleEntity,
+        candidate: BattleEntity,
+    ) -> tuple[float, float, float, float, float]:
+        """Return a mirrored-space ordering key for equal-distance targets."""
+        center_x = (self.arena_left + self.arena_right) / 2
+        lane_offset = candidate.position.x - center_x
+        forward_position = (
+            candidate.position.y
+            if entity.team == "red"
+            else self.screen_height - candidate.position.y
+        )
+        # Crown towers stay ahead of other buildings, then troops. The remaining
+        # fields prefer the same lane in mirrored situations without relying on
+        # whichever entity happened to be created first.
+        return (
+            0.0 if candidate.tower_kind == "princess" else 1.0,
+            0.0 if candidate.tower_kind == "king" else 1.0,
+            abs(lane_offset),
+            candidate.position.x,
+            forward_position,
+        )
 
     def _is_in_attack_range(
         self,
@@ -1662,10 +1689,13 @@ class BattleEngine:
 
         direction = entity.position - pygame.Vector2(source_position)
         if direction.length_squared() <= 1e-9:
-            direction = pygame.Vector2(
-                -1 if entity.entity_id % 2 else 1,
-                0,
-            )
+            center_x = (self.arena_left + self.arena_right) / 2
+            if entity.position.x < center_x - 1e-6:
+                direction = pygame.Vector2(-1, 0)
+            elif entity.position.x > center_x + 1e-6:
+                direction = pygame.Vector2(1, 0)
+            else:
+                direction = pygame.Vector2(-1, 0)
         else:
             direction = direction.normalize()
 
