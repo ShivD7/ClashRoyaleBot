@@ -1,8 +1,26 @@
-"""Tests for deterministic combat, movement, targeting, and damage.
+"""Executable specification for deterministic combat behavior.
 
-Every test creates a fresh BattleEngine. Tests deploy only the cards needed for
-one situation, advance exact time amounts, and then inspect entity state. This
-keeps failures tied to one combat rule instead of a full three-minute match.
+Use this file as the reading companion to ``battle_engine.py``. Sections follow
+roughly the same lifecycle as a live entity: creation, targeting, movement,
+collision, attacks, status effects, and tower/match results.
+
+Test pattern
+------------
+Nearly every test follows the same three-stage pattern:
+
+1. **Arrange:** create a fresh engine and deploy only the required cards.
+2. **Act:** advance an exact amount of simulation time or call one public
+   effect such as ``apply_knockback``.
+3. **Assert:** inspect public entity/battle state rather than pixels on screen.
+
+Small scenarios are intentional. If a full match failed, many rules could be
+responsible; if a two-unit scenario fails, the broken contract is much clearer.
+Exact time increments also document whether damage/movement happens before or
+after a boundary. Parameterized tests run the same rule for mirrored teams or
+multiple cards without duplicating the explanation.
+
+The engine keeps dead entities for stable IDs/history, so tests generally use
+``is_alive`` or ``living_entities`` rather than assuming dead objects vanish.
 """
 
 import pytest
@@ -22,7 +40,11 @@ from battle_engine import BattleEngine, EntityState
 
 
 def make_engine() -> BattleEngine:
-    """Create the same deterministic level-11 engine used by the viewer."""
+    """Create the exact geometry and level-11 rules used by the real viewer.
+
+    Centralizing this fixture prevents a test-only arena from silently drifting
+    away from production tower, bridge, river, or tile measurements.
+    """
     return BattleEngine(
         tile_size=TILE_SIZE,
         screen_height=ARENA_HEIGHT,
@@ -37,7 +59,11 @@ def make_engine() -> BattleEngine:
 
 
 def card_named(name: str):
-    """Find one immutable card definition used to arrange a test battle."""
+    """Find an immutable catalog template used to arrange a focused scenario.
+
+    Deployment turns this shared definition into fresh mutable BattleEntity
+    objects, so reusing the catalog object across tests is safe.
+    """
     return next(card for card in CARD_CATALOG if card.name == name)
 
 

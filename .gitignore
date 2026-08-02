@@ -1,13 +1,21 @@
+# Local Python environment. Dependencies belong here, never in Git.
 .venv/
+# Codex may create temporary worktrees while working on parallel branches.
 .worktrees/
+
+# Python bytecode and tool caches can always be regenerated.
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .hypothesis/
 .ruff_cache/
+
+# Test coverage output is local diagnostic data, not source code.
 .coverage
 htmlcov/
 
+# RL experiments can become very large. Keep learned weights, TensorBoard
+# events, and run logs out of the source repository.
 checkpoints/
 runs/
 logs/

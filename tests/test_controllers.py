@@ -1,8 +1,22 @@
-"""Tests for controller construction, legal actions, and decision isolation.
+"""Executable specification for the safe controller/match boundary.
 
-The important boundary is that controllers may request actions but cannot
-directly spend Elixir, cycle a hand, or spawn a unit. These tests build a small
-viewer state and verify that all controller types stay behind that boundary.
+The central invariant is authority: controllers may *request* actions but may
+not directly spend Elixir, cycle a hand, create entities, or bypass placement.
+These tests build a headless slice of ``ArenaViewer`` and verify that all
+controller types stay behind that boundary.
+
+The sections progress from configuration to integration:
+
+1. factory/CLI tests prove controllers can be selected without code changes;
+2. player-state tests prove red and blue resources are independent;
+3. legal-action tests prove controllers see the same rules as human input;
+4. scheduling tests prove decisions occur inside fixed simulation time and
+   alternate first-mover order;
+5. the RL adapter test proves an injected policy returns a request without
+   receiving mutation authority.
+
+This file does not test policy quality. Random and scripted controllers are
+baselines whose contract is legality and reproducibility, not optimal play.
 """
 
 import pytest
@@ -28,7 +42,11 @@ from controllers import (
 
 
 class RecordingController:
-    """Minimal non-human controller that records when it was asked to act."""
+    """Test double that records scheduling order without changing the match.
+
+    Returning None isolates *when* each controller was called from card choice
+    and placement behavior.
+    """
 
     def __init__(self, team: str, action_log: list[str]) -> None:
         self.team = team
@@ -47,7 +65,12 @@ class RecordingController:
 
 
 def make_controller_viewer() -> ArenaViewer:
-    """Create controller-facing match state without opening a Pygame window."""
+    """Create controller-facing match state without opening a Pygame window.
+
+    The object contains real player/card/Elixir state and a real BattleEngine,
+    but skips fonts, display surfaces, and input fields that controller methods
+    never touch.
+    """
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.battle = viewer.create_battle_engine()
     viewer.players = viewer.create_player_states()

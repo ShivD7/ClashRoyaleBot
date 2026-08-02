@@ -1,8 +1,28 @@
-"""Tests for screen geometry, match flow, cards, Elixir, and the home screen.
+"""Executable specification for match coordination and arena geometry.
 
-These tests usually build only the smallest state needed for one rule. That is
-why some tests create ``ArenaViewer`` with ``__new__`` instead of opening a real
-Pygame window. The goal is to test rules quickly without drawing frames.
+This file tests the non-combat responsibilities currently housed in
+``ArenaViewer``: coordinate conversion, immutable card data, card cycling,
+placement authority, Elixir, match phases, reset behavior, and deck building.
+Drawing is mostly excluded because gameplay should not depend on rendered
+pixels.
+
+Why ``ArenaViewer.__new__`` appears here
+----------------------------------------
+Calling ``ArenaViewer()`` initializes Pygame, fonts, and a desktop window.
+Most rule tests do not need any of that. They allocate an uninitialized viewer
+with ``__new__`` and then attach only the fields required by the public method
+under test. This is a lightweight test seam, not a second implementation.
+
+When reading a test, distinguish three layers:
+
+* static/class helpers test pure grid and rectangle calculations;
+* small constructed viewers test match rules without opening a window;
+* a real ``BattleEngine`` is attached when placement or tower health must use
+  live combat footprints.
+
+The long-term headless match refactor should make these tests even simpler:
+match-rule tests will target that class, while only input/drawing tests will
+need ``ArenaViewer``.
 """
 
 from types import SimpleNamespace
@@ -1019,7 +1039,12 @@ def make_match_state_viewer(
     red_crowns: int,
     blue_crowns: int,
 ) -> ArenaViewer:
-    """Build the state needed to test match phases without opening a window."""
+    """Build only the state needed for regulation/overtime phase tests.
+
+    ``SimpleNamespace`` stands in for BattleEngine because these tests need
+    only ``winning_team``, crown scores, and a projectile list. Tests that need
+    actual tower health replace it with ``create_battle_engine()`` explicitly.
+    """
     viewer = ArenaViewer.__new__(ArenaViewer)
     viewer.match_finished = False
     viewer.match_winner = None

@@ -1,6 +1,11 @@
+# Install the complete runtime set before adding development-only tools. This
+# recursive include means `pip install -r requirements-dev.txt` is sufficient;
+# there is no need to run a second install command for requirements.txt.
 -r requirements.txt
 
-# Automated tests, coverage, property testing, and code quality
+# pytest runs the example-based suite in tests/. pytest-cov measures which rule
+# paths execute, Hypothesis can generate edge cases, and Ruff checks formatting
+# and common Python mistakes. Only pytest is required for the current tests.
 pytest>=8.0,<10.0
 pytest-cov>=6.0,<8.0
 hypothesis>=6.0,<7.0

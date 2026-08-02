@@ -1,16 +1,30 @@
 """Interchangeable decision makers for human, scripted, and learned players.
 
-Controllers may request actions, but they never mutate the match. The match
-remains responsible for validating placement, spending Elixir, cycling cards,
-and spawning entities, which prevents every controller type from cheating.
+This module is intentionally small. A controller is a *decision source*, not a
+second game engine. It may inspect a frozen snapshot and request one action,
+but it cannot spend Elixir, rotate a hand, spawn a unit, or damage a tower.
+``ArenaViewer.try_play_action`` remains the authority for all of those changes.
 
-How controller decisions flow
------------------------------
-The viewer builds a read-only ``ControllerContext`` from current match state.
-It then calls ``choose_action``. A controller may return one ``PlayCardAction``
-or return ``None`` to wait. The viewer validates returned actions through the
-same rules used for mouse input. This means random, scripted, fixed, and future
-learned controllers all use one safe interface.
+Decision flow
+-------------
+
+1. The match builds a read-only ``ControllerContext`` for one team.
+2. The match calls that controller's ``choose_action(context)`` method.
+3. The controller returns ``PlayCardAction`` or ``None`` to wait.
+4. The match revalidates the request against the latest authoritative state.
+5. Only a valid request is applied.
+
+Human input joins the flow after step 2: mouse/keyboard code creates the same
+``PlayCardAction`` type. Random, scripted, fixed, human, and future learned
+players therefore cannot gain different rule privileges.
+
+RL status
+---------
+``RLController`` is currently only a library-neutral adapter. The present
+``ControllerContext`` exposes hands, Elixir, scores, and legal actions, but not
+the complete battlefield. A future Gymnasium/PettingZoo wrapper must add a
+numerical observation encoder rather than treating this placeholder as the
+finished learning environment.
 """
 
 from __future__ import annotations
@@ -28,7 +42,12 @@ from typing import Callable, Sequence
 # match. They contain descriptions and requested coordinates, not live objects.
 @dataclass(frozen=True)
 class PlayCardAction:
-    """Request that one hand slot be deployed on one arena tile."""
+    """Request that one hand slot be deployed on one arena tile.
+
+    ``hand_slot`` is 0 through 3. ``tile`` is ``(column, row)`` on the 18-by-32
+    grid, not a logical-pixel position. The action is only a request; legality
+    is checked later by the match.
+    """
 
     hand_slot: int
     tile: tuple[int, int]
@@ -36,7 +55,12 @@ class PlayCardAction:
 
 @dataclass(frozen=True)
 class ControllerCard:
-    """Card information a controller is allowed to inspect."""
+    """Immutable public description of one card currently in a hand.
+
+    It intentionally omits the viewer's live ``Card`` object. Controllers get
+    strategic labels and rule categories without receiving a mutable path back
+    into match state.
+    """
 
     name: str
     elixir_cost: int
@@ -50,7 +74,13 @@ class ControllerCard:
 
 @dataclass(frozen=True)
 class ControllerContext:
-    """Read-only decision snapshot supplied by the authoritative match."""
+    """Read-only decision snapshot supplied by the authoritative match.
+
+    A new object is built at decision time, so it is a snapshot rather than a
+    live view. ``legal_actions`` already accounts for affordability, territory,
+    destroyed-tower lane unlocks, and occupied footprints. This shape is enough
+    for the built-in baselines but deliberately not the final RL observation.
+    """
 
     team: str
     match_elapsed: float
@@ -61,7 +91,11 @@ class ControllerContext:
 
 
 class PlayerController(ABC):
-    """Base class implemented by every source of player decisions."""
+    """Minimal contract implemented by every source of player decisions.
+
+    The controller may keep private episode memory, but ``reset`` must clear it
+    so a rematch does not inherit hidden state from the previous episode.
+    """
 
     name = "base"
 
@@ -95,7 +129,11 @@ class HumanController(PlayerController):
 # These controllers are useful at different stages: Random is a basic baseline,
 # Scripted produces understandable lane pushes, and Fixed repeats a curriculum.
 class RandomController(PlayerController):
-    """Random legal-action baseline useful for smoke tests and evaluation."""
+    """Seeded random legal-action baseline for smoke tests and evaluation.
+
+    A private ``random.Random`` avoids changing Python's global random stream.
+    Resetting restores the seed, making repeated episodes reproducible.
+    """
 
     name = "random"
 
@@ -121,7 +159,12 @@ class RandomController(PlayerController):
 
 
 class ScriptedController(PlayerController):
-    """Simple lane-push opponent with deterministic card preferences."""
+    """Simple deterministic opponent that alternates understandable lane pushes.
+
+    This is a baseline/curriculum opponent, not an attempt at optimal play. It
+    first ranks affordable cards by strategic role, then places the winner near
+    a desired lane and forward deployment row.
+    """
 
     name = "scripted"
 
@@ -212,7 +255,12 @@ class ScheduledPlay:
 
 
 class FixedSequenceController(PlayerController):
-    """Play named cards at predefined times whenever each action is legal."""
+    """Replay a named, timed curriculum without skipping blocked entries.
+
+    If the next scheduled card is unavailable, unaffordable, or illegal at its
+    requested tile, the controller waits and tries that same entry again at the
+    next decision. This makes scenarios repeatable for debugging.
+    """
 
     name = "fixed"
 
@@ -262,7 +310,12 @@ Policy = Callable[[ControllerContext], PlayCardAction | None]
 # RLController does not choose a machine-learning library. Training code injects
 # any callable with the Policy shape, keeping this simulator framework-neutral.
 class RLController(PlayerController):
-    """Adapter for a future learned policy with the same action contract."""
+    """Adapter for a future learned policy with the same action contract.
+
+    The policy callable is injected instead of importing Torch or a particular
+    RL framework here. That separation keeps simulator imports light and lets
+    training code choose its own model implementation.
+    """
 
     name = "rl"
 

@@ -1,33 +1,44 @@
-"""Show and run the Clash Royale-style arena.
+"""Top-level match coordinator and Pygame interface for the arena simulator.
 
-This file is split into five main parts:
+This is the composition root: the only module that connects controllers,
+combat, player resources, match phases, input, and drawing. It is large because
+the future headless match/RL layer has not yet been extracted from the viewer.
 
-1. Settings for the screen, game rules, and colors.
-2. Classes that store tower and Elixir data.
-3. Helper functions for the match timer.
-4. The ``ArenaViewer`` class, which handles input, updates, and drawing.
-5. The ``main`` function, which starts the game.
+Responsibility map
+------------------
 
-For each screen frame, the game checks input, runs any ready 50-millisecond
-game updates, and redraws the screen.
+* Pygame supplies events, a window, fonts, rectangles, vector math, and drawing.
+* ``BattleEngine`` owns live combat: entities, movement, attacks, and damage.
+* ``PlayerState`` owns each team's card cycle and Elixir.
+* ``ArenaViewer`` owns placement authority and match-phase transitions.
+* Controllers inspect snapshots and request actions; they never mutate state.
 
-How this file fits into the project
------------------------------------
-``arena_viewer.py`` is the top-level coordinator. It connects three different
-kinds of work that should not be mixed together:
+Runtime flow
+------------
+``main`` chooses the two controllers and creates ``ArenaViewer``. ``run`` then
+repeats: collect input, accumulate real frame time, execute as many exact 50 ms
+simulation steps as are due, draw one logical frame, scale it to the desktop
+window, and display it. The home screen draws without advancing battle time.
 
-* Pygame reads the keyboard and mouse and draws the current screen.
-* ``BattleEngine`` owns troops, towers, movement, attacks, and damage.
-* Controllers choose an action, but this file checks whether it is legal.
+The authoritative card path is ``try_play_action``. Both human gestures and AI
+decisions reach it. A valid action spends Elixir, records the deployment,
+creates combat objects in ``BattleEngine``, and cycles the hand. A failed action
+does none of those things.
 
-The main loop near the bottom follows the same order every frame: read input,
-advance the match in fixed time steps, and draw the latest state. The home
-screen skips the battle update and only draws the deck builder.
+Coordinate systems
+------------------
+The arena is 18 by 32 tiles. Combat and drawing use *logical pixels*. The final
+logical image is scaled down to the actual desktop window, and mouse positions
+are converted back before hit testing. Tile actions therefore remain stable if
+``WINDOW_SCALE`` changes. Red owns the top, blue owns the bottom, and Pygame's
+positive y direction points down.
 
-Most positions in this file use *logical pixels*. The complete game is drawn
-at ``SCREEN_WIDTH`` by ``SCREEN_HEIGHT`` first. That finished image is then
-shrunk to the desktop window. Mouse positions are changed back into logical
-pixels before hit testing, so scaling does not change the game rules.
+Suggested reading order
+-----------------------
+Read the small data classes, card catalog, ``ArenaViewer.__init__``, placement
+helpers, ``try_play_action``, controller update, fixed simulation update, and
+finally ``run``. Drawing methods are intentionally later because they consume
+state but do not define combat rules.
 """
 
 from __future__ import annotations
@@ -256,20 +267,29 @@ class PlacementRule(Enum):
 class Card:
     """Describe one reusable card and the rules its future entity will follow.
 
-    ``role`` is a strategic label, while the remaining fields are simulator
-    rules. Ground targeting includes ground troops and buildings. Spells have
-    no spawned units because they apply an effect directly to a chosen area.
+    A Card is immutable catalog data, not one physical card in a player's hand.
+    ``role`` is a strategic/controller label. ``placement_rule`` belongs to the
+    match layer, while targeting, movement, and attack fields are copied into
+    entities by ``BattleEngine``. Ground targeting includes ground troops and
+    buildings. Spells have no spawned units because they affect an area.
+
+    Exactly one stats field is normally populated: troops/buildings use
+    ``unit_stats`` and spells use ``spell_stats``.
     """
 
+    # Display identity, resource cost, and broad category.
     name: str
     elixir_cost: int
     card_type: str
+    # Strategic label used by ScriptedController; it is not a combat mechanic.
     role: str
+    # Match-layer placement and engine-layer targeting/movement rules.
     placement_rule: PlacementRule
     target_priority: str
     target_types: str
     movement_type: str
     attack_style: str
+    # A swarm card creates several entities from the same UnitStats template.
     unit_count: int
     unit_stats: UnitStats | None
     spell_stats: SpellStats | None
@@ -319,7 +339,11 @@ class CardCycle:
 
 @dataclass(frozen=True)
 class Deployment:
-    """Record a temporary card marker placed on one arena tile."""
+    """Historical record of one accepted card action.
+
+    This is useful for debugging and future replay export. It is not the live
+    troop/building: those mutable objects are created inside ``BattleEngine``.
+    """
 
     card: Card
     tile: tuple[int, int]
@@ -327,7 +351,12 @@ class Deployment:
 
 @dataclass
 class FireballAnimation:
-    """Store one visual-only Fireball flight and impact animation."""
+    """Visual-only Fireball flight and impact animation.
+
+    The combat engine owns a separate ``PendingSpell`` with the same travel
+    duration. Advancing or dropping visual frames can never move the gameplay
+    impact time.
+    """
 
     team: str
     start: tuple[float, float]
@@ -368,8 +397,9 @@ class FireballAnimation:
 class ElixirMeter:
     """Store the player's Elixir and handle adding or spending it.
 
-    This class does not draw anything. The game rules stay separate from the
-    Elixir bar, which makes them easier to test and reuse.
+    This class does not draw anything. ``amount`` is fractional so generation
+    is smooth, even though the HUD and card costs use whole values. Keeping the
+    resource rule separate from its bar makes it reusable by a headless match.
     """
 
     amount: float = ELIXIR_START
@@ -441,7 +471,12 @@ class ElixirMeter:
 
 @dataclass
 class PlayerState:
-    """Mutable card-cycle and Elixir state independently owned by one team."""
+    """Mutable non-combat state independently owned by one team.
+
+    Troops and towers do not live here; they live together in BattleEngine.
+    Keeping red and blue in separate PlayerState instances prevents a play from
+    accidentally spending or rotating the opponent's resources.
+    """
 
     team: str
     card_cycle: CardCycle
@@ -452,9 +487,10 @@ class PlayerState:
 class FixedTimestepClock:
     """Turn changing frame times into equal simulation steps.
 
-    Drawing may take a different amount of time on each frame. This clock saves
-    that time until there is enough for one or more 50-millisecond game updates.
-    Any smaller amount is kept for the next frame.
+    Drawing may take a different amount of real time on each frame. This clock
+    saves elapsed milliseconds until there is enough for one or more exact
+    50-millisecond game updates. Any remainder is kept for the next frame. It
+    does not itself update the match; it only returns a step count to ``run``.
     """
 
     waiting_ms: int = 0
@@ -488,6 +524,17 @@ class FixedTimestepClock:
 # The catalog can grow beyond eight cards while an individual battle deck
 # remains exactly eight cards. This makes future deck-building possible without
 # coupling the complete card collection to CardCycle.
+#
+# Most catalog entries use positional arguments to stay compact. Read each one
+# in this order:
+#
+# Card(name, elixir_cost, card_type, role, placement_rule,
+#      target_priority, target_types, movement_type, attack_style, unit_count,
+#      unit_stats, spell_stats)
+#
+# UnitStats begins with (max_health, damage, hit_speed, movement_speed,
+# attack_range). Less common mechanics use the named arguments that follow,
+# which makes special behavior such as splash, spawning, or jumping visible.
 _SKELETON_STATS = UnitStats(
     81,
     81,
@@ -1166,10 +1213,16 @@ def format_match_time(seconds: int) -> str:
 
 
 class ArenaViewer:
-    """Handle the game window, input, updates, and drawing.
+    """Own match-level state and connect it to a Pygame window.
 
-    Each drawing method adds one part of the screen. Parts drawn later appear
-    on top of parts drawn earlier.
+    Despite the name, this class currently does more than viewing: it is also
+    the authoritative owner of decks, Elixir, legal card actions, and match
+    phases. ``BattleEngine`` remains authoritative for combat. A future RL
+    refactor should move the non-visual responsibilities into a headless match
+    class while leaving these drawing and event methods here.
+
+    Each ``draw_*`` method adds one layer. Methods called later in ``draw``
+    appear on top of earlier layers and must not mutate combat state.
     """
 
     def __init__(
@@ -1273,8 +1326,9 @@ class ArenaViewer:
         # Deployment history is useful for replay/debugging. Mutable combat
         # entities themselves live in BattleEngine.
         self.deployments: list[Deployment] = []
-        # Spell animations are visual only. BattleEngine still resolves spell
-        # damage immediately so animation frame rate cannot change gameplay.
+        # Spell animations are visual only. BattleEngine resolves damage using
+        # its own deterministic PendingSpell countdown, so rendering frame rate
+        # cannot make a travelling spell land earlier or later.
         self.fireball_animations: list[FireballAnimation] = []
         self.battle = self.create_battle_engine()
         self.fixed_timestep = FixedTimestepClock()
@@ -1790,15 +1844,25 @@ class ArenaViewer:
         return played
 
     def try_play_action(self, team: str, action: PlayCardAction) -> bool:
-        """Validate and apply one controller request through shared game rules."""
+        """Validate and atomically apply one human/controller request.
+
+        The checks intentionally happen before spending Elixir. Once spending
+        succeeds, deployment and cycling are expected to succeed as one
+        transaction. Returning ``False`` therefore guarantees no resource,
+        hand, deployment-history, or combat mutation caused by this request.
+        """
+        # Gate 1: finished/tiebreaker matches accept no normal card actions.
         if (
             getattr(self, "match_finished", False)
             or getattr(self, "tiebreaker_active", False)
         ):
             return False
+        # Gate 2: never index the hand until the untrusted request is bounded.
         if not 0 <= action.hand_slot < 4:
             return False
 
+        # Production viewers store both teams in players. The fallback keeps
+        # older focused tests able to construct only local card/elixir objects.
         if hasattr(self, "players"):
             player = self.players[team]
             card_cycle = player.card_cycle
@@ -1808,6 +1872,8 @@ class ArenaViewer:
             card_cycle = self.card_cycle
             elixir = self.elixir
 
+        # Gate 3: terrain policy and BattleEngine body footprints must both
+        # accept the selected card at this tile.
         card = card_cycle.hand[action.hand_slot]
         if not self.is_valid_live_deployment(
             action.tile,
@@ -1816,9 +1882,13 @@ class ArenaViewer:
         ):
             return False
 
+        # Gate 4: spending is the final fallible check. Nothing below this point
+        # should reject an action, which preserves transaction-like behavior.
         if not elixir.spend(card.elixir_cost):
             return False
 
+        # Commit: record history, create optional visuals, mutate combat, then
+        # rotate the hand. Visual Fireball state never controls spell damage.
         self.deployments.append(Deployment(card, action.tile))
         if card.name == "Fireball":
             travel_seconds = (
@@ -1838,6 +1908,8 @@ class ArenaViewer:
                 team,
                 self.tile_rectangle(action.tile).center,
             )
+        # Cycling comes last so BattleEngine always receives the card that was
+        # actually validated and paid for, not the replacement entering its slot.
         card_cycle.play(action.hand_slot)
         return True
 
@@ -1879,7 +1951,14 @@ class ArenaViewer:
         ]
 
     def legal_actions_for(self, team: str) -> tuple[PlayCardAction, ...]:
-        """Enumerate every card/tile action currently legal for one team."""
+        """Enumerate every affordable, placeable hand-slot/tile pair.
+
+        This is the authoritative source used by built-in controllers. It can
+        be expensive because it checks up to four cards across all 576 tiles,
+        including current entity footprints. A future RL wrapper should encode
+        the same results as a fixed-size boolean action mask rather than
+        allocating thousands of action objects for every model decision.
+        """
         if getattr(self, "tiebreaker_active", False):
             return ()
 
@@ -1904,7 +1983,13 @@ class ArenaViewer:
         return tuple(actions)
 
     def controller_context(self, team: str) -> ControllerContext:
-        """Build the read-only snapshot supplied to a team's controller."""
+        """Build a detached read-only snapshot for one controller decision.
+
+        Card descriptions and scores are copied into new containers. The
+        current context intentionally lacks live battlefield entities, which is
+        why it is a safe baseline interface but not yet a complete RL
+        observation.
+        """
         player = self.players[team]
         return ControllerContext(
             team=team,
@@ -1928,7 +2013,14 @@ class ArenaViewer:
         )
 
     def update_controllers(self, delta_seconds: float) -> None:
-        """Ask non-human controllers for actions at a bounded decision rate."""
+        """Ask non-human controllers for actions at a bounded decision rate.
+
+        Combat updates at 20 Hz, but controllers decide every 0.25 seconds
+        (4 Hz). When both are ready, their evaluation order reverses each time
+        to avoid permanently giving one team first-action priority. Requests
+        are still applied sequentially and revalidated through
+        ``try_play_action``.
+        """
         decision_interval = 0.25
         ready_teams = []
         for team in ("blue", "red"):
@@ -1968,7 +2060,13 @@ class ArenaViewer:
     # phase changes and when normal combat must stop.
 
     def update_match_state(self, now_ms: int | None = None) -> None:
-        """Advance regulation, overtime, and tiebreaker phase transitions."""
+        """Advance regulation, overtime, tiebreaker, and terminal transitions.
+
+        This method evaluates already-produced battle state; it does not move
+        entities. It runs both before and after combat in a fixed simulation
+        step so an existing terminal state stops work and newly produced tower
+        destruction is recognized immediately.
+        """
         if self.match_finished:
             return
 
@@ -2096,7 +2194,13 @@ class ArenaViewer:
         return self.match_started_at + round(self.match_elapsed * 1000)
 
     def update_simulation(self) -> None:
-        """Advance every gameplay system by one fixed 50-millisecond step."""
+        """Advance every gameplay system by exactly one 50-millisecond step.
+
+        Normal order is: evaluate match phase, generate both players' Elixir,
+        request due controller actions, update notices, advance combat, advance
+        simulation time, then evaluate the result again. Tiebreaker replaces
+        normal play with equal Crown Tower drain but uses the same fixed clock.
+        """
         self.update_match_state()
         if self.match_finished:
             return
@@ -4331,6 +4435,8 @@ class ArenaViewer:
         Drawing can run at different speeds, but gameplay always moves forward
         in exact 50-millisecond steps. Slow frames run several updates to catch
         up. Fast frames save their extra time until the next update is ready.
+        This real-time loop is deliberately separate from ``update_simulation``
+        so tests and a future trainer can advance gameplay without a window.
         """
         while self.running:
             frame_ms = self.clock.tick(FPS)

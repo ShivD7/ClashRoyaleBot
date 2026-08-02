@@ -1,16 +1,28 @@
-# Simulation and numerical state
+# Runtime dependency groups
+# -------------------------
+# pygame-ce is the only third-party package imported by the current simulator.
+# The numerical and RL packages below are declared now so the future headless
+# environment and training code have one documented dependency contract.
+
+# Numerical arrays for fixed-size observations, action masks, and metrics.
 numpy>=2.0,<3.0
 
-# Reinforcement-learning environment APIs
+# Standard single-agent and multi-agent environment APIs. Gymnasium is the
+# likely first wrapper; PettingZoo will support two-agent/self-play training.
 gymnasium>=1.2,<2.0
 pettingzoo>=1.25,<2.0
 
-# Neural networks and reinforcement-learning algorithms
+# Neural-network and RL trainers. These are not imported by the simulator yet.
+# Recent PyTorch releases do not provide native Intel-macOS wheels, so this
+# group needs a supported training machine even though simulator work does not.
 torch>=2.8,<3.0
 stable-baselines3>=2.9,<3.0
 sb3-contrib>=2.9,<3.0
 
-# Configuration, experiment logging, and optional visualization
+# Experiment configuration and metrics. TensorBoard will read the run data
+# written during training; it is unrelated to the Pygame arena renderer.
 PyYAML>=6.0,<7.0
 tensorboard>=2.19,<3.0
+
+# Window creation, input, drawing, rectangles, and 2-D vector math.
 pygame-ce>=2.5,<3.0

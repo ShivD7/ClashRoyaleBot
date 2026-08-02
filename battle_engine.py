@@ -1,21 +1,43 @@
-"""Deterministic combat rules for the arena simulator.
+"""Deterministic combat rules for one arena battle.
 
-The engine owns mutable battle state but knows nothing about buttons, fonts, or
-card dragging. Keeping it separate from Pygame drawing lets tests advance a
-battle by exact time steps and makes the same engine reusable by an RL agent.
+This module is the physics/combat layer. It owns live towers, troops,
+buildings, projectiles, and travelling spells. It deliberately knows nothing
+about decks, Elixir, legal player territory, buttons, fonts, or card dragging;
+those match/UI concerns live in :mod:`arena_viewer`.
 
-How to read this file
+Beginner mental model
 ---------------------
-The small data classes at the top describe stats and changing entities.
-``BattleEngine`` then owns one complete battlefield. Public methods answer
-questions or accept high-level actions such as deploying a card. Private
-methods (their names begin with ``_``) carry out the smaller targeting,
-movement, collision, and attack steps.
+There are two kinds of objects in this file:
 
-One call to ``update`` advances the whole battle by the supplied amount of
-time. It uses a fixed order: update timers, choose targets, plan movement,
-separate overlapping bodies, attack, move projectiles, and activate King
-Towers. Keeping this order stable makes repeated training runs reproducible.
+* Frozen *definitions* such as ``UnitStats`` and ``SpellStats`` describe what a
+  card creates. They are safe to share between every copy of the same unit.
+* Mutable *episode objects* such as ``BattleEntity`` and ``Projectile`` exist
+  only inside one battle and change as simulation time advances.
+
+``BattleEngine`` is the container for all episode objects. The viewer gives it
+high-level commands such as "deploy this card for blue at this pixel". The
+engine turns those commands into entities and advances them with ``update``.
+
+Units and coordinates
+---------------------
+Card ranges and splash radii are expressed in arena tiles. Runtime positions,
+body radii, and velocities are logical Pygame pixels. ``tile_size`` is the
+conversion factor. Time values are seconds and health/damage values are hit
+points. Keeping these units explicit is important when numerical RL
+observations are added later.
+
+How to read the update loop
+---------------------------
+One call to ``update(delta_seconds)`` advances a deterministic slice of time.
+Its broad order is: activate/age objects, process status timers, acquire
+targets, resolve ready attacks and plan movement, apply movement, separate
+collisions, advance projectiles, land due spells, and recheck King activation.
+Movement is planned from shared starting positions before any planned mover is
+changed. The ordering is part of the game rules, so changing it can change
+results even when every individual helper remains the same.
+
+Public methods expose battle results or accept commands. Helpers beginning with
+``_`` implement the smaller targeting, routing, collision, and damage stages.
 """
 
 from __future__ import annotations
@@ -44,31 +66,47 @@ class EntityState(Enum):
 
 @dataclass(frozen=True)
 class UnitStats:
-    """Level-11 combat statistics shared by every unit spawned from a card."""
+    """Immutable level-11 template shared by every copy of one unit.
 
+    Ranges are in tiles, durations are seconds, and ``body_radius`` is already
+    in logical pixels. ``movement_speed`` and ``projectile_speed`` are converted
+    to pixel rates when the engine creates the runtime entity/projectile.
+    """
+
+    # Basic health and attack timing.
     max_health: int
     damage: int
     hit_speed: float
+    # Navigation and target reach.
     movement_speed: float
     attack_range: float
     projectile_speed: float = 0.0
+    # Optional card-specific attack effects. Zero/None means "not used".
     attack_splash_radius: float = 0.0
     inferno_damage_stages: tuple[int, int, int] | None = None
     freeze_duration: float = 0.0
     self_destructs_on_attack: bool = False
+    # Perception and physical collision properties.
     sight_range: float = 5.5
     body_radius: float = 9.0
     mass: float = 1.0
     knockback_resistance: float = 0.0
-    # Troops use ``None``. Deployed buildings must provide a positive lifetime.
+    # Building-only lifecycle. Troops use None for both fields.
     lifetime_seconds: float | None = None
     spawner: SpawnerStats | None = None
+    # Special movement flag currently used by Hog Rider.
     can_jump_river: bool = False
 
 
 @dataclass(frozen=True)
 class SpellStats:
-    """Level-11 spell damage, affected radius, and optional status effects."""
+    """Immutable level-11 spell damage, radius, and optional effects.
+
+    Crown Towers often receive reduced spell damage, so their value is stored
+    separately. Radius and knockback distance are tiles; the two durations are
+    seconds. ``travel_seconds`` determines whether deployment applies the spell
+    now or adds it to ``BattleEngine.pending_spells``.
+    """
 
     damage: int
     crown_tower_damage: int
@@ -79,7 +117,13 @@ class SpellStats:
 
 
 class CardLike(Protocol):
-    """The card attributes required by the engine without importing the UI."""
+    """The structural card interface accepted by the combat engine.
+
+    A Protocol describes required attributes without creating a base class.
+    Both the viewer's normal ``Card`` and an internal ``SpawnedCard`` therefore
+    work here, while this module avoids importing the viewer and creating a
+    circular dependency.
+    """
 
     name: str
     card_type: str
@@ -118,12 +162,20 @@ class SpawnerStats:
 
 @dataclass
 class BattleEntity:
-    """A troop, deployable building, or Crown Tower participating in combat."""
+    """One mutable troop, deployable building, or Crown Tower.
 
+    The field list is long because every combatant uses the same update
+    pipeline. Read it in groups: identity/position, copied attack stats,
+    targeting/collision rules, current state, navigation, forced movement, and
+    building/special-effect timers.
+    """
+
+    # Stable identity and world placement.
     entity_id: int
     name: str
     team: str
     position: pygame.Vector2
+    # Runtime health and copied offensive statistics.
     max_health: int
     health: float
     damage: int
@@ -136,19 +188,26 @@ class BattleEntity:
     inferno_damage_stages: tuple[int, int, int] | None
     freeze_duration: float
     self_destructs_on_attack: bool
+    # Rules that decide which enemies can be selected.
     target_priority: str
     target_types: str
     movement_type: str
     attack_style: str
+    # Circular collision body. Infinite mass means collision cannot move it.
     radius: float
     mass: float
     knockback_resistance: float
+    # Buildings share this class with troops; tower_kind distinguishes Crown
+    # Towers from player-deployed buildings.
     is_building: bool = False
     tower_kind: str | None = None
     active: bool = True
+    # Current finite-state-machine and attack-lock data.
     state: EntityState = EntityState.RETARGETING
     target_id: int | None = None
     attack_cooldown: float = 0.0
+    # Ground pathfinding remembers a bridge so a unit does not switch lanes on
+    # every tick. The following jump fields implement Hog Rider's river jump.
     lane_x: float | None = None
     bridge_committed: bool = False
     can_jump_river: bool = False
@@ -156,16 +215,20 @@ class BattleEntity:
     jump_destination: pygame.Vector2 | None = None
     jump_elapsed: float = 0.0
     jump_duration: float = 0.0
+    # Normal desired velocity and temporary forced knockback are kept separate.
     velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_velocity: pygame.Vector2 = field(default_factory=pygame.Vector2)
     knockback_remaining: float = 0.0
     # A stunned entity stays targetable but cannot move or begin an attack.
     stun_remaining: float = 0.0
-    # Only deployed buildings use these fields. Crown Towers never expire.
+    # Only deployed buildings use these lifecycle/spawner fields. Crown Towers
+    # never expire and always leave lifetime_seconds as None.
     lifetime_seconds: float | None = None
     lifetime_elapsed: float = 0.0
     spawner: SpawnerStats | None = None
     spawn_cooldown: float = 0.0
+    # Inferno uses lock time to choose its damage stage. Freeze is kept apart
+    # from stun because it has different visuals and may later gain new rules.
     target_lock_elapsed: float = 0.0
     freeze_remaining: float = 0.0
 
@@ -206,7 +269,12 @@ class BattleEntity:
 
 @dataclass
 class Projectile:
-    """A visible attack travelling toward one permanently locked target."""
+    """A mutable ranged attack travelling toward one locked target.
+
+    The target ID never changes in flight. If that target dies first, the
+    projectile disappears rather than retargeting. ``visual_style`` only tells
+    the viewer how to draw it; impact behavior stays in the engine.
+    """
 
     projectile_id: int
     source_id: int
@@ -224,7 +292,12 @@ class Projectile:
 
 @dataclass
 class PendingSpell:
-    """Store a travelling spell until its deterministic impact time."""
+    """A spell command waiting for its deterministic impact time.
+
+    Unlike a projectile, a spell is locked to a position rather than an entity.
+    Targets may enter or leave the radius before ``remaining_seconds`` reaches
+    zero; the affected entities are selected at impact.
+    """
 
     card: CardLike
     team: str
@@ -233,7 +306,12 @@ class PendingSpell:
 
 
 class BattleEngine:
-    """Advance targeting, movement, attacks, projectiles, health, and death."""
+    """Authoritative mutable combat world for a single match.
+
+    ``entities`` retains both living and dead objects so IDs remain stable and
+    tests/replays can inspect history. Use ``living_entities`` for gameplay.
+    Projectiles and pending spells, by contrast, are removed when resolved.
+    """
 
     PRINCESS_TOWER_HEALTH = 3052
     KING_TOWER_HEALTH = 4824
@@ -270,17 +348,24 @@ class BattleEngine:
         screen settings. From the two bridge centers, the engine can calculate
         the playable left and right edges needed by movement and collision.
         """
+        # Immutable arena geometry shared by every entity in this battle.
         self.tile_size = tile_size
         self.screen_height = screen_height
         self.river_top = river_top
         self.river_bottom = river_top + river_height
         self.bridge_x_positions = bridge_x_positions
+        # The two bridge centers sit one half-lane-span inside each arena edge,
+        # so their separation is enough to recover the playable horizontal box.
         lane_span = abs(bridge_x_positions[1] - bridge_x_positions[0])
         self.arena_left = min(bridge_x_positions) - lane_span / 2
         self.arena_right = max(bridge_x_positions) + lane_span / 2
+        # Episode collections. Dead entities remain in entities for stable IDs;
+        # resolved projectiles/spells are removed from their active queues.
         self.entities: list[BattleEntity] = []
         self.projectiles: list[Projectile] = []
         self.pending_spells: list[PendingSpell] = []
+        # Monotonic IDs make references and deterministic sorting independent of
+        # Python object addresses.
         self._next_entity_id = 1
         self._next_projectile_id = 1
 
@@ -435,12 +520,21 @@ class BattleEngine:
         team: str,
         position: tuple[int, int],
     ) -> tuple[BattleEntity, ...]:
-        """Spawn units or schedule a spell for its configured impact time."""
+        """Turn an accepted card definition into live combat state.
+
+        The match layer has already checked territory and spent Elixir before
+        calling this method. This layer validates combat-stat consistency,
+        separates spell and entity creation, and returns newly spawned bodies
+        so callers/tests may inspect them. Spells return an empty tuple because
+        they create no BattleEntity.
+        """
         # A destroyed King Tower is a terminal state. Training code and the UI
         # cannot accidentally add actions to a battle that has already ended.
         if self.winning_team is not None:
             return ()
 
+        # Spells lock a position. A positive travel time adds a countdown;
+        # otherwise cast_spell selects affected entities immediately.
         if card.card_type == "spell":
             stats = card.spell_stats
             if stats is None:
@@ -466,6 +560,8 @@ class BattleEngine:
                 "has no unit statistics",
             )
 
+        # Troops/buildings may produce a formation. Generate every center first,
+        # then create one independently mutable entity per center.
         spawned = []
         for index, spawn_position in enumerate(
             self._spawn_positions(card, position),
@@ -630,7 +726,8 @@ class BattleEngine:
             health=float(stats.max_health),
             damage=stats.damage,
             hit_speed=stats.hit_speed,
-            # Speeds in the source data use 60 as Medium, or one tile/second.
+            # Card templates store speed as tiles per second. Runtime movement
+            # uses logical pixels per second, so multiply once at spawn time.
             movement_speed=stats.movement_speed * self.tile_size,
             attack_range=stats.attack_range,
             sight_range=stats.sight_range,
@@ -694,9 +791,13 @@ class BattleEngine:
         center = pygame.Vector2(position)
         radius_pixels = stats.radius * self.tile_size
 
+        # Snapshot living_entities before damage. An entity killed during this
+        # loop stays in the tuple but take_damage safely ignores later repeats.
         for target in self.living_entities:
             if target.team == team:
                 continue
+            # Add the target's body radius so a spell circle touching the edge
+            # of a body counts as a hit; targets are not mathematical points.
             if center.distance_to(target.position) > radius_pixels + target.radius:
                 continue
 
@@ -715,6 +816,7 @@ class BattleEngine:
                     distance_tiles=stats.knockback_distance,
                 )
 
+        # Spell damage may wake a King directly or destroy an allied Princess.
         self._activate_king_towers()
 
     def _update_pending_spells(self, delta_seconds: float) -> None:
@@ -765,20 +867,27 @@ class BattleEngine:
         Planned movement is stored in a dictionary and applied afterward. This
         prevents an earlier entity in the list from receiving a hidden advantage.
         """
+        # Stage 0: terminal/non-positive updates are intentional no-ops. This
+        # keeps a trainer from accidentally changing a finished episode.
         if delta_seconds <= 0 or self.winning_team is not None:
             return
 
+        # Stage 1: global lifecycle work happens before individual decisions.
         self._activate_king_towers()
         self._decay_deployed_buildings(delta_seconds)
         self._update_spawners(delta_seconds)
         movement_displacements: dict[int, pygame.Vector2] = {}
 
-        # Decide every entity's action before changing any position. Movement
-        # therefore uses a shared snapshot instead of depending on spawn order.
+        # Stage 2: decide every entity's action before changing any planned
+        # position. Movement therefore uses a shared snapshot instead of giving
+        # an early mover a different world. Stable ID order keeps runs repeatable.
         for entity in sorted(self.entities, key=lambda item: item.entity_id):
             if not entity.is_alive or not entity.active:
                 continue
 
+            # Stage 2a: determine how much of this tick the entity is actually
+            # allowed to act. A large test step may contain both the disabled
+            # part and the post-status active remainder.
             entity.velocity.update(0, 0)
             active_time = delta_seconds
             disabled_time = min(
@@ -808,6 +917,8 @@ class BattleEngine:
                 entity.attack_cooldown - active_time,
             )
 
+            # Stage 2b: an active river jump or knockback overrides ordinary AI
+            # movement/attacks for its portion of the tick.
             if entity.is_jumping:
                 self._advance_river_jump(entity, active_time)
                 continue
@@ -825,6 +936,8 @@ class BattleEngine:
                 entity.state = EntityState.MOVING
                 continue
 
+            # Stage 2c: keep a valid lock, replace a dead/illegal target, or let
+            # a walking (not-yet-attacking) troop notice something closer.
             target = self.entity_by_id(entity.target_id)
 
             if (
@@ -853,6 +966,8 @@ class BattleEngine:
             if target is None:
                 continue
 
+            # Stage 2d: choose exactly one outcome—special jump, attack, wait as
+            # a stationary building, or record desired troop displacement.
             if self._try_start_river_jump(entity, target):
                 self._advance_river_jump(entity, active_time)
                 continue
@@ -884,13 +999,17 @@ class BattleEngine:
                     velocity * active_time
                 )
 
+        # Stage 3: commit the planned positions simultaneously, resolve body
+        # overlap, and then move existing projectiles toward their locked targets.
         if self.winning_team is None:
             self._apply_movement(movement_displacements)
             self._update_projectiles(delta_seconds)
-        # A spell whose timer reaches zero lands at the end of this time slice.
-        # Its knockback movement therefore begins on the following update.
+        # Stage 4: a spell whose timer reaches zero lands at the end of this
+        # slice. Any resulting knockback starts moving on the following update.
         if self.winning_team is None:
             self._update_pending_spells(delta_seconds)
+        # Stage 5: damage in attacks, projectiles, or spells may have changed a
+        # King Tower's activation condition.
         self._activate_king_towers()
 
     def _decay_deployed_buildings(self, delta_seconds: float) -> None:
