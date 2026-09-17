@@ -33,13 +33,15 @@ python arena_viewer.py --blue-controller random --red-controller fixed
 Valid controller names are `human`, `random`, `scripted`, `fixed`, and `rl`.
 The current `rl` controller waits forever unless training code injects a policy.
 
-## The three main modules
+## Main modules
 
 | File | Responsibility | Does not own |
 | --- | --- | --- |
 | `arena_viewer.py` | Match coordination, decks, hands, Elixir, legal placement, clocks, input, and rendering | Detailed troop combat |
 | `battle_engine.py` | Towers, troops, buildings, targeting, movement, collisions, attacks, spells, health, and death | Pygame events, HUDs, decks, or Elixir |
 | `controllers.py` | A safe interface for human, random, scripted, fixed, and future learned decision makers | Authority to mutate the match |
+| `training_interface.py` | Numerical observations, discrete action IDs, and legality masks | Episode timing or rewards |
+| `training_env.py` | Gymnasium reset/step lifecycle, fixed observation arrays, opponent scheduling, and rewards | Combat or placement rules |
 
 The dependency direction is intentional:
 
@@ -205,23 +207,124 @@ lane.
 
 ## Controllers and future reinforcement learning
 
-The current `RLController` is only an adapter around a callable policy. It is
-not yet a Gymnasium environment and its `ControllerContext` does not yet include
-full battlefield observations.
+`Match` now exposes a renderer-independent numerical training boundary:
 
-The recommended next architectural step is to extract the non-visual match
-state from `ArenaViewer` into a headless match class, then add:
+- `match.observation(team)` reports the observing side's hand, card costs, and
+  Elixir; public tower and battlefield state; scores, time, phase, projectiles,
+  and pending spells.
+- Opponent hand, card queue, and Elixir are intentionally private and do not
+  appear in observations. Deployed opponent objects are public.
+- `match.action_mask(team)` returns 2,305 flags. Index 0 is wait; indices
+  1–2,304 map four hand slots across the arena's 576 tiles.
+- `match.apply_discrete_action(team, action_id)` uses that fixed mapping and the
+  same placement validator as the Pygame viewer.
 
-- `reset(seed=...)` and `step(action)`;
-- a fixed numerical observation representation;
-- a discrete action encoding plus a legal-action mask;
-- terminal and intermediate rewards;
-- deterministic episode seeding;
-- scripted-opponent and self-play modes.
+`ClashRoyaleEnv` wraps that boundary in Gymnasium's single-agent API. Blue is
+the learning player and red uses the existing scripted controller:
 
-The existing action space naturally maps four hand slots across 576 arena
-tiles. A future discrete encoding can reserve action zero for “wait” and use
-the remaining 2,304 values for `(hand slot, row, column)`.
+```python
+from training_env import ClashRoyaleEnv
+
+env = ClashRoyaleEnv()
+observation, info = env.reset(seed=42)
+observation, reward, terminated, truncated, info = env.step(action)
+```
+
+Each call to `step` advances five shared 0.05-second physics updates, or 0.25
+simulated seconds. The scripted opponent acts through the match's existing
+controller schedule during those same updates. `info["action_mask"]` and
+`env.action_masks()` expose the current mask for MaskablePPO-style trainers.
+The initial reward is sparse: +1 for a blue win, -1 for a red win, and 0 for a
+draw or a non-terminal decision.
+
+The reward values are named constants in `training_env.py` and are awarded only
+from the terminal winner. Playing cards, spending Elixir, ordinary tower
+damage, and automatic tiebreaker damage do not create intermediate reward.
+This prevents the learner from maximizing a convenient activity counter rather
+than learning to win. If sparse learning proves too slow, tower-damage shaping
+can be added later with an explicit exclusion for automatic tiebreaker drain.
+
+Variable battlefield collections are padded into fixed-size numerical arrays
+with presence masks so vectorized trainers can batch observations. Any count
+above a configured capacity is reported in `info["observation_overflow"]`.
+
+## Baseline training and machine support
+
+Check the current interpreter before installing or training:
+
+```bash
+python training_baseline.py check
+```
+
+The baseline uses `sb3-contrib` MaskablePPO with `MultiInputPolicy` and separate
+64-by-64 feed-forward policy/value networks. It trains blue against the fixed
+scripted opponent, saves the checkpoint, reloads it immediately, and makes a
+masked prediction to verify the saved artifact:
+
+```bash
+python training_baseline.py train --timesteps 10000
+```
+
+By default, two held-out episodes per opponent/side are run before and after
+training on the same evaluation seeds. The comparison is written to
+`checkpoints/maskable_ppo_baseline.evaluation.json`; increase confidence with
+`--eval-episodes 10` once the smoke run succeeds. These evaluation matches are
+not inserted into PPO's training buffer.
+
+Evaluation seeds are separate from the training seed. Evaluation reports wins,
+losses, draws, and win rate against random and scripted opponents from both the
+blue and red sides:
+
+```bash
+python training_baseline.py evaluate --episodes 10
+```
+
+To load the same model through the existing `RLController` and watch it in the
+Pygame viewer:
+
+```bash
+python training_baseline.py watch --team blue --opponent scripted
+```
+
+Install `requirements-training.txt` on a currently supported PyTorch machine.
+PyTorch's current binary matrix supports Linux x86_64, Windows x86_64, and
+Apple-Silicon macOS, but not Intel macOS. The checked MacBook Air is x86_64 with
+two CPU cores, 8 GB memory, Intel UHD 617 graphics, and Python 3.14; its normal
+virtual environment can run the simulator but cannot install current PyTorch.
+
+The recommended training machine is the Dell XPS with 64-bit Linux or Windows
+and Python 3.11 or 3.12:
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux:   source .venv/bin/activate
+python -m pip install -r requirements-training.txt
+python training_baseline.py check
+python training_baseline.py train --timesteps 10000 --device auto
+```
+
+If the Dell has a supported NVIDIA GPU, install the PyTorch build selected for
+its CUDA driver from pytorch.org before installing the remaining requirements.
+Otherwise, MaskablePPO runs on its CPU with `--device cpu`.
+
+`environment-intel-mac.yml` provides an optional legacy Intel-Mac CPU fallback
+using Python 3.10 and conda-forge PyTorch 2.5.1. It is expected to be slow and
+is outside PyTorch's current tested binary matrix:
+
+```bash
+conda env create -f environment-intel-mac.yml
+conda activate clash-royale-intel-mac
+python training_baseline.py check
+python training_baseline.py train --timesteps 1000 --device cpu
+```
+
+The remaining training work is to add:
+
+- optional intermediate reward shaping;
+- randomized decks and opponents driven by the Gymnasium seed;
+- experiment configuration and metrics;
+- self-play after the single-agent baseline is stable.
 
 ## Tests as executable documentation
 
@@ -234,6 +337,11 @@ them alongside the implementation:
   Elixir, match phases, resets, and input-facing behavior.
 - `tests/test_controllers.py` documents the controller boundary, independent
   player state, legal actions, decision scheduling, and the RL adapter.
+- `tests/test_training_interface.py` documents observation visibility, action
+  encoding, masks, and window-free match completion.
+- `tests/test_training_env.py` documents Gymnasium reset/step behavior, episode
+  timing, truncation, reward signs, draw handling, tiebreaker behavior, seeded
+  trajectory reproduction, full-match termination, and API compliance.
 
 Most tests follow Arrange–Act–Assert:
 

@@ -1,0 +1,20 @@
+# Legacy CPU-only fallback for Intel Macs. PyTorch stopped publishing current
+# macOS x86_64 wheels, but conda-forge retains an older compatible build. This
+# environment is intentionally pinned and should not be used for model release
+# validation; prefer the supported requirements-training.txt stack on the Dell.
+name: clash-royale-intel-mac
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy>=2.0,<3.0
+  - pygame>=2.5,<3.0
+  - gymnasium>=1.2,<2.0
+  - pytorch=2.5.1
+  - pytorch-cpu=2.5.1
+  - pip
+  - pip:
+      - stable-baselines3==2.7.0
+      - sb3-contrib==2.7.0
+      - pytest>=8,<10
+      - ruff>=0.11,<1.0

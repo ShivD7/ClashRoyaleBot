@@ -1,0 +1,12 @@
+# Complete portable training stack for supported Linux/Windows x86_64 and
+# Apple-Silicon macOS machines. Intel macOS is not in PyTorch's current binary
+# support matrix; see environment-intel-mac.yml for the legacy CPU fallback.
+-r requirements.txt
+
+torch>=2.8,<3.0
+stable-baselines3>=2.9,<3.0
+sb3-contrib>=2.9,<3.0
+
+# Experiment configuration and TensorBoard metrics.
+PyYAML>=6.0,<7.0
+tensorboard>=2.19,<3.0

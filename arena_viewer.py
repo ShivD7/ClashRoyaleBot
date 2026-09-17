@@ -1342,6 +1342,10 @@ class ArenaViewer:
         self.tiebreaker_active = False
         self.tiebreaker_started_at_ms: int | None = None
         self.tiebreaker_notice_remaining = 0.0
+        # The viewer is an adapter around the same match surface exposed by
+        # ``Match``. Keeping this reference makes the ownership explicit for
+        # callers that want to share viewer and training integrations.
+        self.match = self
 
     @staticmethod
     def create_battle_engine() -> BattleEngine:
@@ -4466,6 +4470,160 @@ class ArenaViewer:
             self.draw()
 
         pygame.quit()
+
+
+class Match:
+    """Headless owner of one complete match.
+
+    The viewer predates the headless API and contains a number of carefully
+    tested rule methods.  This class exposes those same methods without
+    constructing a display: it builds the combat world, player resources, and
+    controller loop directly, then reuses the authoritative placement and
+    simulation methods.  ``state`` is a small serializable snapshot suitable
+    for training and ``winner`` is ``"blue"``, ``"red"``, or ``None``.
+    """
+
+    def __init__(
+        self,
+        blue_controller: str | PlayerController = "random",
+        red_controller: str | PlayerController = "random",
+        selected_deck: tuple[Card, ...] = DEFAULT_DECK,
+    ) -> None:
+        # Deliberately do not call pygame.init(), set_mode(), or create fonts.
+        self.controllers = {
+            "blue": create_controller(blue_controller, "blue")
+            if isinstance(blue_controller, str) else blue_controller,
+            "red": create_controller(red_controller, "red")
+            if isinstance(red_controller, str) else red_controller,
+        }
+        self.local_team = "blue"
+        self.selected_deck = list(selected_deck)
+        self.players = self.create_player_states()
+        self.sync_local_player_aliases()
+        self.controller_decision_elapsed = {"blue": 0.0, "red": 0.0}
+        self.controller_update_order = ["blue", "red"]
+        self.deployments = []
+        self.fireball_animations = []
+        self.battle = self.create_battle_engine()
+        self.match_started_at = 0
+        self.match_elapsed = 0.0
+        self.match_finished = False
+        self.match_winner = None
+        self.match_finished_at_ms = None
+        self.overtime_active = False
+        self.overtime_started_at_ms = None
+        self.overtime_notice_remaining = 0.0
+        self.tiebreaker_active = False
+        self.tiebreaker_started_at_ms = None
+        self.tiebreaker_notice_remaining = 0.0
+        self.elixir_multiplier_notice = None
+        self.elixir_multiplier_notice_remaining = 0.0
+        self.selected_card_index = None
+        self.dragged_card_index = None
+        self.drag_position = None
+
+    # The following are the shared rule surface.  Keeping the implementation
+    # in one place also means existing viewer tests and future training code use
+    # exactly the same legality and simulation behavior.
+    create_battle_engine = staticmethod(ArenaViewer.create_battle_engine)
+    create_player_states = ArenaViewer.create_player_states
+    sync_local_player_aliases = ArenaViewer.sync_local_player_aliases
+
+    def reset(self, now_ms: int | None = 0) -> None:
+        """Start a fresh episode without consulting wall-clock or display state."""
+        ArenaViewer.reset_match(self, now_ms=0 if now_ms is None else now_ms)
+
+    reset_match = reset
+    try_play_action = ArenaViewer.try_play_action
+    legal_actions_for = ArenaViewer.legal_actions_for
+    controller_context = ArenaViewer.controller_context
+    update_controllers = ArenaViewer.update_controllers
+    update_match_state = ArenaViewer.update_match_state
+    start_tiebreaker = ArenaViewer.start_tiebreaker
+    update_tiebreaker = ArenaViewer.update_tiebreaker
+    simulation_now_ms = ArenaViewer.simulation_now_ms
+    update_simulation = ArenaViewer.update_simulation
+    finish_match = ArenaViewer.finish_match
+    update_overtime_notice = ArenaViewer.update_overtime_notice
+    update_elixir_multiplier_notice = ArenaViewer.update_elixir_multiplier_notice
+    is_valid_live_deployment = ArenaViewer.is_valid_live_deployment
+    is_valid_deployment_tile = staticmethod(ArenaViewer.is_valid_deployment_tile)
+    restricted_deployment_tiles = staticmethod(ArenaViewer.restricted_deployment_tiles)
+    destroyed_enemy_princess_lanes = ArenaViewer.destroyed_enemy_princess_lanes
+    tile_rectangle = staticmethod(ArenaViewer.tile_rectangle)
+    queue_fireball_animation = ArenaViewer.queue_fireball_animation
+
+    @property
+    def winner(self) -> str | None:
+        return self.match_winner
+
+    @property
+    def done(self) -> bool:
+        return self.match_finished
+
+    @property
+    def state(self) -> dict[str, object]:
+        """Return public match-level status without either side's private data.
+
+        Policies should use :meth:`observation` for their team-specific view.
+        Keeping hands, queues, and Elixir out of this general status prevents a
+        training loop from accidentally treating the omniscient engine as its
+        model input.
+        """
+        return {
+            "elapsed": self.match_elapsed,
+            "finished": self.match_finished,
+            "winner": self.match_winner,
+            "crown_scores": dict(self.battle.crown_scores),
+        }
+
+    def step(self, steps: int = 1) -> dict[str, object]:
+        """Advance a deterministic number of fixed simulation steps."""
+        if steps < 0:
+            raise ValueError("steps must be non-negative")
+        for _ in range(steps):
+            if self.match_finished:
+                break
+            self.update_simulation()
+        return self.state
+
+    def run_until_finished(self, max_steps: int = 12_000) -> str | None:
+        """Run fixed steps until a winner is known, returning that winner.
+
+        The bound protects training jobs from a malformed controller or future
+        ruleset that cannot reach a terminal state.
+        """
+        for _ in range(max_steps):
+            if self.match_finished:
+                return self.match_winner
+            self.update_simulation()
+        raise RuntimeError("match did not finish within max_steps")
+
+    advance = step
+
+    def play(self, team: str, action: PlayCardAction) -> bool:
+        """Accept one requested move from either player."""
+        if team not in self.players:
+            raise ValueError("team must be 'blue' or 'red'")
+        return self.try_play_action(team, action)
+
+    def observation(self, team: str) -> dict[str, object]:
+        """Return the public numerical game state visible to one team."""
+        from training_interface import observation
+
+        return observation(self, team)
+
+    def action_mask(self, team: str) -> tuple[bool, ...]:
+        """Return legality for wait plus every hand-slot/tile action."""
+        from training_interface import action_mask
+
+        return action_mask(self, team)
+
+    def apply_discrete_action(self, team: str, action_id: int) -> bool:
+        """Decode and apply one action from the fixed training action space."""
+        from training_interface import apply_action
+
+        return apply_action(self, team, action_id)
 
 
 def parse_controller_arguments(
