@@ -10,6 +10,7 @@ from training_baseline import (
     EvaluationResult,
     attach_model_to_rl_controller,
     compatibility_report,
+    parse_arguments,
     train_baseline,
 )
 
@@ -90,3 +91,29 @@ def test_evaluation_result_reports_win_rate() -> None:
     )
 
     assert result.win_rate == 0.3
+
+
+def test_train_arguments_support_resuming_to_a_new_checkpoint() -> None:
+    settings = parse_arguments(
+        [
+            "train",
+            "--timesteps",
+            "50000",
+            "--resume",
+            "checkpoints/starting.zip",
+            "--model",
+            "checkpoints/extended.zip",
+        ],
+    )
+
+    assert settings.timesteps == 50_000
+    assert settings.resume.name == "starting.zip"
+    assert settings.model.name == "extended.zip"
+
+
+def test_missing_resume_checkpoint_fails_before_training(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="No trained model found"):
+        train_baseline(
+            total_timesteps=1,
+            resume_from=tmp_path / "missing.zip",
+        )

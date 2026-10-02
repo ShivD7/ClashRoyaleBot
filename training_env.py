@@ -8,6 +8,7 @@ same match ticks, so it acts through the normal controller schedule.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import gymnasium as gym
@@ -43,6 +44,34 @@ WIN_REWARD = 1.0
 LOSS_REWARD = -1.0
 DRAW_REWARD = 0.0
 NON_TERMINAL_REWARD = 0.0
+
+# Intermediate rewards are deliberately bounded below the terminal objective.
+# Across all three towers, health progress can contribute at most 0.5 before
+# crown and terminal rewards. Card combat is much weaker: destroying one full
+# ordinary health bar is worth only 0.005.
+TOWER_HEALTH_REWARD_SCALE = 0.5
+CROWN_REWARD = 0.15
+CARD_DAMAGE_REWARD_SCALE = 0.005
+CARD_DAMAGE_PER_STEP_CAP = 1.0
+
+
+@dataclass(frozen=True)
+class _CardHealth:
+    team: str
+    health: float
+    max_health: float
+    is_building: bool
+    lifetime_seconds: float | None
+    lifetime_remaining: float | None
+    self_destructs_on_attack: bool
+
+
+@dataclass(frozen=True)
+class _RewardSnapshot:
+    tower_health: dict[str, float]
+    crowns: dict[str, int]
+    cards: dict[int, _CardHealth]
+    tiebreaker_active: bool
 
 
 def _padded_records(
@@ -110,9 +139,9 @@ def encode_fixed_observation(
 class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
     """Single-agent environment with one learner and one baseline opponent.
 
-    Rewards are intentionally sparse in this first wrapper: +1 for a blue win,
-    -1 for a red win, and 0 for a draw or any non-terminal decision. Reward
-    shaping can be added later without changing observations or action IDs.
+    Wins and losses remain the main objective. Small progress rewards cover
+    Crown Tower health, crowns, and ordinary card combat so the learner gets
+    useful feedback before a long match ends.
     """
 
     metadata: ClassVar[dict[str, Any]] = {
@@ -140,12 +169,15 @@ class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
         self.opponent_name = opponent
         self.max_decisions = max_decisions
         self.action_space = spaces.Discrete(ACTION_COUNT)
-        record_matrix = lambda rows, columns: spaces.Box(
-            low=-OBSERVATION_LIMIT,
-            high=OBSERVATION_LIMIT,
-            shape=(rows, columns),
-            dtype=np.float32,
-        )
+
+        def record_matrix(rows: int, columns: int) -> spaces.Box:
+            return spaces.Box(
+                low=-OBSERVATION_LIMIT,
+                high=OBSERVATION_LIMIT,
+                shape=(rows, columns),
+                dtype=np.float32,
+            )
+
         self.observation_space = spaces.Dict(
             {
                 "hand_card_ids": spaces.MultiDiscrete(
@@ -243,6 +275,7 @@ class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
 
         action_id = int(action)
         legal_mask = match.action_mask(self.learner_team)
+        reward_before = self._reward_snapshot()
         action_accepted = legal_mask[action_id] and match.apply_discrete_action(
             self.learner_team,
             action_id,
@@ -258,13 +291,19 @@ class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
         self.decision_count += 1
         terminated = match.done
         truncated = not terminated and self.decision_count >= self.max_decisions
-        reward = self._terminal_reward() if terminated else NON_TERMINAL_REWARD
+        reward_components = self._reward_components(
+            reward_before,
+            completed_steps=completed_steps,
+            terminated=terminated,
+        )
+        reward = sum(reward_components.values())
         observation, overflow = self._observation()
         info = self._info(
             action_accepted=action_accepted,
             overflow=overflow,
         )
         info["simulation_steps"] = completed_steps
+        info["reward_components"] = reward_components
         return observation, reward, terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
@@ -288,6 +327,148 @@ class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
         if winner == self.opponent_team:
             return LOSS_REWARD
         return DRAW_REWARD
+
+    def _reward_snapshot(self) -> _RewardSnapshot:
+        match = self._require_match()
+        tower_totals = {"blue": 0.0, "red": 0.0}
+        tower_counts = {"blue": 0, "red": 0}
+        cards = {}
+
+        for entity in match.battle.entities:
+            if entity.tower_kind is not None:
+                tower_totals[entity.team] += entity.health / entity.max_health
+                tower_counts[entity.team] += 1
+                continue
+
+            lifetime_remaining = (
+                max(0.0, entity.lifetime_seconds - entity.lifetime_elapsed)
+                if entity.lifetime_seconds is not None
+                else None
+            )
+            cards[entity.entity_id] = _CardHealth(
+                team=entity.team,
+                health=entity.health,
+                max_health=float(entity.max_health),
+                is_building=entity.is_building,
+                lifetime_seconds=entity.lifetime_seconds,
+                lifetime_remaining=lifetime_remaining,
+                self_destructs_on_attack=entity.self_destructs_on_attack,
+            )
+
+        tower_health = {
+            team: (
+                tower_totals[team] / tower_counts[team]
+                if tower_counts[team]
+                else 0.0
+            )
+            for team in ("blue", "red")
+        }
+        return _RewardSnapshot(
+            tower_health=tower_health,
+            crowns=dict(match.battle.crown_scores),
+            cards=cards,
+            tiebreaker_active=match.tiebreaker_active,
+        )
+
+    def _reward_components(
+        self,
+        before: _RewardSnapshot,
+        *,
+        completed_steps: int,
+        terminated: bool,
+    ) -> dict[str, float]:
+        after = self._reward_snapshot()
+        terminal = self._terminal_reward() if terminated else NON_TERMINAL_REWARD
+        tower_reward = 0.0
+        crown_reward = 0.0
+
+        # Tiebreaker drain is automatic, not caused by either policy. It must
+        # never look like useful tower damage or a policy-earned crown.
+        if not (before.tiebreaker_active or after.tiebreaker_active):
+            enemy_progress = (
+                before.tower_health[self.opponent_team]
+                - after.tower_health[self.opponent_team]
+            )
+            own_damage = (
+                before.tower_health[self.learner_team]
+                - after.tower_health[self.learner_team]
+            )
+            tower_reward = TOWER_HEALTH_REWARD_SCALE * (
+                enemy_progress - own_damage
+            )
+
+            learner_crowns = (
+                after.crowns[self.learner_team]
+                - before.crowns[self.learner_team]
+            )
+            opponent_crowns = (
+                after.crowns[self.opponent_team]
+                - before.crowns[self.opponent_team]
+            )
+            crown_reward = CROWN_REWARD * (
+                learner_crowns - opponent_crowns
+            )
+
+        elapsed = completed_steps * FIXED_TIMESTEP_SECONDS
+        card_damage = self._card_damage_reward(before, elapsed)
+        return {
+            "terminal": terminal,
+            "tower_health": tower_reward,
+            "crowns": crown_reward,
+            "card_damage": card_damage,
+        }
+
+    def _card_damage_reward(
+        self,
+        before: _RewardSnapshot,
+        elapsed: float,
+    ) -> float:
+        current_entities = {
+            entity.entity_id: entity
+            for entity in self._require_match().battle.entities
+            if entity.tower_kind is None
+        }
+        damage_by_team = {"blue": 0.0, "red": 0.0}
+
+        for entity_id, previous in before.cards.items():
+            # Self-destructing cards remove their own health after attacking;
+            # treating that as enemy damage would reward doing nothing.
+            if previous.self_destructs_on_attack:
+                continue
+
+            current = current_entities.get(entity_id)
+            current_health = current.health if current is not None else 0.0
+            lost_health = max(0.0, previous.health - current_health)
+
+            # Deployed buildings naturally lose health throughout their life.
+            # Remove that predictable decay so only combat damage is rewarded.
+            if (
+                previous.is_building
+                and previous.lifetime_seconds is not None
+                and previous.lifetime_remaining is not None
+            ):
+                active_time = min(elapsed, previous.lifetime_remaining)
+                natural_decay = (
+                    previous.max_health
+                    * active_time
+                    / previous.lifetime_seconds
+                )
+                lost_health = max(0.0, lost_health - natural_decay)
+
+            damage_by_team[previous.team] += min(
+                1.0,
+                lost_health / previous.max_health,
+            )
+
+        enemy_damage = min(
+            CARD_DAMAGE_PER_STEP_CAP,
+            damage_by_team[self.opponent_team],
+        )
+        own_damage = min(
+            CARD_DAMAGE_PER_STEP_CAP,
+            damage_by_team[self.learner_team],
+        )
+        return CARD_DAMAGE_REWARD_SCALE * (enemy_damage - own_damage)
 
     def _observation(self) -> tuple[dict[str, np.ndarray], dict[str, int]]:
         return encode_fixed_observation(
@@ -315,12 +496,15 @@ class ClashRoyaleEnv(gym.Env[dict[str, np.ndarray], int]):
 __all__ = [
     "DECISION_SECONDS",
     "DRAW_REWARD",
+    "CARD_DAMAGE_REWARD_SCALE",
+    "CROWN_REWARD",
     "LOSS_REWARD",
     "MAX_ENTITIES",
     "MAX_PENDING_SPELLS",
     "MAX_PROJECTILES",
     "NON_TERMINAL_REWARD",
     "SIMULATION_STEPS_PER_DECISION",
+    "TOWER_HEALTH_REWARD_SCALE",
     "WIN_REWARD",
     "ClashRoyaleEnv",
     "encode_fixed_observation",

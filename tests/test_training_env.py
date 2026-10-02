@@ -2,9 +2,12 @@
 
 import numpy as np
 import pygame
+import pytest
 from gymnasium.utils.env_checker import check_env
 
+from arena_viewer import CARD_CATALOG
 from training_env import (
+    CARD_DAMAGE_REWARD_SCALE,
     DECISION_SECONDS,
     DRAW_REWARD,
     LOSS_REWARD,
@@ -14,6 +17,26 @@ from training_env import (
     ClashRoyaleEnv,
 )
 from training_interface import ACTION_COUNT, WAIT_ACTION
+
+
+def card_named(name: str):
+    """Return one immutable card definition used by the real match engine."""
+    return next(card for card in CARD_CATALOG if card.name == name)
+
+
+def damage_once_during_next_step(env, target, amount: float) -> None:
+    """Inject one controlled hit while preserving the normal match update."""
+    original_update = env.match.update_simulation
+    damage_applied = False
+
+    def update_with_damage() -> None:
+        nonlocal damage_applied
+        if not damage_applied:
+            target.take_damage(amount)
+            damage_applied = True
+        original_update()
+
+    env.match.update_simulation = update_with_damage
 
 
 def test_reset_returns_valid_observation_and_action_mask_without_a_window() -> None:
@@ -199,6 +222,69 @@ def test_automatic_tiebreaker_damage_has_no_intermediate_reward() -> None:
     assert not truncated
 
 
+def test_damaging_an_opponent_card_gives_a_very_small_reward() -> None:
+    env = ClashRoyaleEnv()
+    env.reset(seed=4)
+    enemy_knight = env.match.battle.deploy_card(
+        card_named("Knight"),
+        "red",
+        (env.match.battle.arena_left + 50, 80),
+    )[0]
+    damage_once_during_next_step(env, enemy_knight, 100.0)
+
+    _, reward, terminated, truncated, info = env.step(WAIT_ACTION)
+
+    expected = CARD_DAMAGE_REWARD_SCALE * 100.0 / enemy_knight.max_health
+    assert reward == pytest.approx(expected)
+    assert info["reward_components"]["card_damage"] == pytest.approx(expected)
+    assert 0.0 < reward < 0.001
+    assert not terminated
+    assert not truncated
+
+
+def test_friendly_card_damage_has_the_equal_opposite_penalty() -> None:
+    env = ClashRoyaleEnv()
+    env.reset(seed=5)
+    friendly_knight = env.match.battle.deploy_card(
+        card_named("Knight"),
+        "blue",
+        (
+            env.match.battle.arena_left + 50,
+            env.match.battle.screen_height - 80,
+        ),
+    )[0]
+    damage_once_during_next_step(env, friendly_knight, 100.0)
+
+    _, reward, terminated, truncated, info = env.step(WAIT_ACTION)
+
+    expected = -CARD_DAMAGE_REWARD_SCALE * 100.0 / friendly_knight.max_health
+    assert reward == pytest.approx(expected)
+    assert info["reward_components"]["card_damage"] == pytest.approx(expected)
+    assert -0.001 < reward < 0.0
+    assert not terminated
+    assert not truncated
+
+
+def test_building_lifetime_decay_does_not_count_as_card_damage() -> None:
+    env = ClashRoyaleEnv()
+    env.reset(seed=6)
+    env.match.battle.deploy_card(
+        card_named("Cannon"),
+        "red",
+        (env.match.battle.arena_left + 50, 80),
+    )
+
+    _, reward, terminated, truncated, info = env.step(WAIT_ACTION)
+
+    assert reward == pytest.approx(NON_TERMINAL_REWARD, abs=1e-12)
+    assert info["reward_components"]["card_damage"] == pytest.approx(
+        0.0,
+        abs=1e-12,
+    )
+    assert not terminated
+    assert not truncated
+
+
 def test_complete_episode_reaches_match_termination_before_safety_limit() -> None:
     env = ClashRoyaleEnv()
     env.reset(seed=42)
@@ -213,7 +299,8 @@ def test_complete_episode_reaches_match_termination_before_safety_limit() -> Non
     assert terminated
     assert not truncated
     assert info["winner"] == "red"
-    assert final_reward == LOSS_REWARD
+    assert info["reward_components"]["terminal"] == LOSS_REWARD
+    assert final_reward < 0.0
     assert env.decision_count < env.max_decisions
 
 

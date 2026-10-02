@@ -122,29 +122,39 @@ def train_baseline(
     *,
     total_timesteps: int = DEFAULT_TIMESTEPS,
     model_path: str | Path = DEFAULT_MODEL_PATH,
+    resume_from: str | Path | None = None,
     seed: int = 42,
     device: str = "auto",
     verbose: int = 1,
     evaluation_episodes: int = 0,
 ) -> Path:
-    """Train a small feed-forward masked PPO policy, then save and reload it."""
+    """Train or resume a masked PPO policy, then save and reload it."""
     if total_timesteps <= 0:
         raise ValueError("total_timesteps must be positive")
+    resume_path = _saved_path(resume_from) if resume_from is not None else None
+    if resume_path is not None and not resume_path.exists():
+        raise FileNotFoundError(f"No trained model found at {resume_path}")
+
     MaskablePPO = _maskable_ppo()
     env = ClashRoyaleEnv(learner_team="blue", opponent="scripted")
-    model = MaskablePPO(
-        "MultiInputPolicy",
-        env,
-        learning_rate=3e-4,
-        n_steps=128,
-        batch_size=64,
-        n_epochs=4,
-        gamma=0.99,
-        seed=seed,
-        device=device,
-        verbose=verbose,
-        policy_kwargs={"net_arch": {"pi": [64, 64], "vf": [64, 64]}},
+    model = (
+        MaskablePPO.load(resume_path, env=env, device=device)
+        if resume_path is not None
+        else MaskablePPO(
+            "MultiInputPolicy",
+            env,
+            learning_rate=3e-4,
+            n_steps=128,
+            batch_size=64,
+            n_epochs=4,
+            gamma=0.99,
+            seed=seed,
+            device=device,
+            verbose=verbose,
+            policy_kwargs={"net_arch": {"pi": [64, 64], "vf": [64, 64]}},
+        )
     )
+    model.verbose = verbose
     before = (
         evaluate_policy(
             model,
@@ -154,7 +164,10 @@ def train_baseline(
         if evaluation_episodes
         else ()
     )
-    model.learn(total_timesteps=total_timesteps)
+    model.learn(
+        total_timesteps=total_timesteps,
+        reset_num_timesteps=resume_path is None,
+    )
 
     destination = _saved_path(model_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -363,6 +376,11 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     train_parser = subparsers.add_parser("train", help="train and save a baseline")
     train_parser.add_argument("--timesteps", type=int, default=DEFAULT_TIMESTEPS)
     train_parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
+    train_parser.add_argument(
+        "--resume",
+        type=Path,
+        help="continue training from an existing MaskablePPO checkpoint",
+    )
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--device", default="auto")
     train_parser.add_argument(
@@ -400,6 +418,7 @@ def main(arguments: list[str] | None = None) -> None:
             saved = train_baseline(
                 total_timesteps=settings.timesteps,
                 model_path=settings.model,
+                resume_from=settings.resume,
                 seed=settings.seed,
                 device=settings.device,
                 evaluation_episodes=settings.eval_episodes,

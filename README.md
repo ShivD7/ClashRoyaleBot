@@ -234,15 +234,21 @@ Each call to `step` advances five shared 0.05-second physics updates, or 0.25
 simulated seconds. The scripted opponent acts through the match's existing
 controller schedule during those same updates. `info["action_mask"]` and
 `env.action_masks()` expose the current mask for MaskablePPO-style trainers.
-The initial reward is sparse: +1 for a blue win, -1 for a red win, and 0 for a
-draw or a non-terminal decision.
+The terminal reward remains the main objective: +1 for a win, -1 for a loss,
+and 0 for a draw. Small symmetric progress rewards make that long-delayed
+signal easier to learn from:
 
-The reward values are named constants in `training_env.py` and are awarded only
-from the terminal winner. Playing cards, spending Elixir, ordinary tower
-damage, and automatic tiebreaker damage do not create intermediate reward.
-This prevents the learner from maximizing a convenient activity counter rather
-than learning to win. If sparse learning proves too slow, tower-damage shaping
-can be added later with an explicit exclusion for automatic tiebreaker drain.
+- reducing the enemy team's normalized Crown Tower health is positive, while
+  losing the same amount of friendly tower health is equally negative;
+- each crown gained or conceded changes the reward by 0.15; and
+- damaging one full enemy card health bar is worth only 0.005, with friendly
+  card damage applying the equal opposite penalty.
+
+Playing a card or spending Elixir never earns reward by itself. Automatic
+tiebreaker damage, natural building lifetime decay, and a self-destructing
+unit's own death are also excluded so the policy cannot exploit damage it did
+not cause. The per-step breakdown is available in
+`info["reward_components"]` for training diagnostics.
 
 Variable battlefield collections are padded into fixed-size numerical arrays
 with presence masks so vectorized trainers can batch observations. Any count
@@ -263,6 +269,16 @@ masked prediction to verify the saved artifact:
 
 ```bash
 python training_baseline.py train --timesteps 10000
+```
+
+Continue an existing checkpoint without resetting PPO's timestep counter. The
+destination can be different so the original checkpoint remains available:
+
+```bash
+python training_baseline.py train --timesteps 50000 \
+  --resume checkpoints/maskable_ppo_baseline.zip \
+  --model checkpoints/extended_training_run.zip \
+  --eval-episodes 0
 ```
 
 By default, two held-out episodes per opponent/side are run before and after
@@ -321,7 +337,6 @@ python training_baseline.py train --timesteps 1000 --device cpu
 
 The remaining training work is to add:
 
-- optional intermediate reward shaping;
 - randomized decks and opponents driven by the Gymnasium seed;
 - experiment configuration and metrics;
 - self-play after the single-agent baseline is stable.
@@ -340,8 +355,9 @@ them alongside the implementation:
 - `tests/test_training_interface.py` documents observation visibility, action
   encoding, masks, and window-free match completion.
 - `tests/test_training_env.py` documents Gymnasium reset/step behavior, episode
-  timing, truncation, reward signs, draw handling, tiebreaker behavior, seeded
-  trajectory reproduction, full-match termination, and API compliance.
+  timing, truncation, reward components, damage exclusions, draw handling,
+  tiebreaker behavior, seeded trajectory reproduction, full-match termination,
+  and API compliance.
 
 Most tests follow Arrange–Act–Assert:
 
